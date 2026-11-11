@@ -269,6 +269,24 @@ class Texture2D implements TextureSource {
     if (direct != null) return Texture2D._(direct, sampling.toSamplerOptions());
     final image = await decodeEncodedImage(bytes, maxSize: maxSize);
     try {
+      // The platform decoder already uploaded the image with a full mip chain
+      // built on the GPU (Impeller's decoder generates mipmaps on upload), so
+      // wrapping it avoids both the GPU readback and the CPU downsample. The
+      // GPU chain averages stored values (not linear light) and the image is
+      // premultiplied.
+      // JPEG only: it has no alpha, so premultiplied equals straight.
+      final isJpeg = bytes.length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
+      if (isJpeg && sampling.mipmaps && mipChainsAreSampled) {
+        gpu.Texture? wrapped;
+        try {
+          wrapped = gpu.Texture.fromImage(gpu.gpuContext, image);
+        } on Object {
+          wrapped = null;
+        }
+        if (wrapped != null && wrapped.mipLevelCount > 1) {
+          return Texture2D._(wrapped, sampling.toSamplerOptions());
+        }
+      }
       return await fromImage(image, content: content, sampling: sampling);
     } finally {
       image.dispose();

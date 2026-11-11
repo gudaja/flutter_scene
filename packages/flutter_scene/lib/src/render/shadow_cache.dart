@@ -173,6 +173,28 @@ class DirectionalShadowCache {
           entry.renderedSignature != staticSignature ||
           entry.direction.distanceToSquared(dir) > 1e-10;
       var refresh = false;
+      // DIAG (home3d WR-60c, not for upstream): why a tile refreshes.
+      String? why;
+      if (!entry.hasContent) {
+        why = 'first';
+      } else if (directionCos < _minDirectionLagCos) {
+        why = 'turn';
+      } else if ((ideal.radius - entry.radius).abs() > entry.radius * 1e-3) {
+        why = 'radius';
+      } else if ((center - entry.center).length >
+          entry.radius * (slackFactor - 1.0)) {
+        why = 'center';
+      } else if (stale && amortized < maxAmortizedRefreshes) {
+        why = entry.renderedSignature != staticSignature ? 'content' : 'dir';
+      }
+      if (why != null) {
+        _diag.add(
+          '$i:$why:${ideal.radius.toStringAsFixed(2)}'
+          ':${(ideal.radius / entry.radius).toStringAsFixed(4)}'
+          ':${((center - entry.center).length / (entry.radius == 0 ? 1 : entry.radius)).toStringAsFixed(3)}',
+        );
+        _diagCounts['$i:$why'] = (_diagCounts['$i:$why'] ?? 0) + 1;
+      }
       if (!fits) {
         // Unusable (first render, coverage drift, a large turn, or a
         // parameter change): must render this frame or the cascade has no
@@ -210,6 +232,24 @@ class DirectionalShadowCache {
         ),
       );
     }
+    _diagPlans++;
+    if (_diag.isNotEmpty) {
+      // ignore: avoid_print
+      print('SHADOWDIAG f=$_diagPlans ${_diag.join(' ')}');
+      _diag.clear();
+    }
+    if (_diagPlans % 50 == 0) {
+      final radii = [
+        for (final c in idealCascades) c.radius.toStringAsFixed(2),
+      ].join(',');
+      // ignore: avoid_print
+      print('SHADOWDIAGSUM plans=$_diagPlans radii=$radii $_diagCounts');
+    }
     return ShadowCachePlan(effective, refreshes, _entries, this);
   }
+
+  // DIAG (home3d WR-60c, not for upstream).
+  final List<String> _diag = [];
+  static final Map<String, int> _diagCounts = {};
+  static int _diagPlans = 0;
 }

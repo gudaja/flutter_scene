@@ -20,8 +20,17 @@ class ShadowCascadeCacheEntry {
   /// correct while it is reused.
   final Matrix4 matrix = Matrix4.zero();
 
-  /// The ideal bounding-sphere the slack box was built around.
+  /// The center of the slack box: the ideal bounding sphere's center at the
+  /// last refresh, led along the camera's motion (see
+  /// [DirectionalShadowCache.leadFraction]).
   final Vector3 center = Vector3.zero();
+
+  /// The ideal bounding sphere's center at the last refresh. The drift from
+  /// it to the next refresh's ideal center is the motion the next box leads
+  /// along.
+  final Vector3 idealCenter = Vector3.zero();
+
+  /// The ideal bounding sphere's radius the slack box was built around.
   double radius = 0.0;
 
   /// Side length of the slack-enlarged orthographic box in world units.
@@ -75,7 +84,12 @@ class ShadowCachePlan {
 /// pass composites them into each frame's atlas and draws only the dynamic
 /// casters on top. Tiles are fit with [slackFactor] extra radius so the
 /// camera can move and turn inside the slack before a cascade must
-/// re-render. Stale tiles (a static caster appeared or vanished, or the light
+/// re-render. A tile stays usable while the ideal sphere, projected through
+/// the tile's own matrix, still lies inside the tile's box, so drift along
+/// the light (inside the box's deep depth range) and toward the box's
+/// corners costs no refresh. A tile re-rendered because the view drifted out
+/// of it is placed ahead of the drift ([leadFraction]), so steady camera
+/// motion crosses the whole slack before the next refresh. Stale tiles (a static caster appeared or vanished, or the light
 /// turned by up to [maxDirectionLagDegrees]) refresh at most
 /// [maxAmortizedRefreshes] per frame, nearest cascade first, so streaming
 /// worlds and a stepped sun never pay for every cascade at once. A stale tile
@@ -85,6 +99,17 @@ class DirectionalShadowCache {
   /// Costs ~13% effective resolution; buys re-render-free camera movement
   /// within the slack.
   static const double slackFactor = 1.15;
+
+  /// How far ahead of the camera's drift a tile re-rendered for drift is
+  /// placed, as a fraction of the slack (`radius * (slackFactor - 1)`).
+  ///
+  /// `0` centers the new tile on the ideal sphere, so steady motion crosses
+  /// half the box's free room before the next refresh. Leading by the
+  /// fraction puts the sphere near the trailing edge instead, so the same
+  /// motion crosses up to `1 + leadFraction` times as much. A fraction below
+  /// one keeps room for the path to curve (an orbit) or reverse. Resolution
+  /// and coverage are unchanged: the sphere still lies inside the box.
+  static const double leadFraction = 0.8;
 
   /// Upper bound on stale-but-usable tile refreshes per frame.
   static const int maxAmortizedRefreshes = 1;
@@ -164,11 +189,12 @@ class DirectionalShadowCache {
       // A tile is reusable while the ideal sphere still fits inside its
       // slack box; the radius only changes with camera/shadow parameters.
       final directionCos = entry.direction.dot(dir);
-      final fits =
+      final sameShape =
           entry.hasContent &&
           directionCos >= _minDirectionLagCos &&
-          (ideal.radius - entry.radius).abs() <= entry.radius * 1e-3 &&
-          (center - entry.center).length <= entry.radius * (slackFactor - 1.0);
+          (ideal.radius - entry.radius).abs() <= entry.radius * 1e-3;
+      final fits =
+          sameShape && sphereInsideTile(entry.matrix, center, ideal.radius);
       final stale =
           entry.renderedSignature != staticSignature ||
           entry.direction.distanceToSquared(dir) > 1e-10;
@@ -185,13 +211,29 @@ class DirectionalShadowCache {
         amortized++;
       }
       if (refresh) {
-        entry.center.setFrom(center);
+        final boxCenter = Vector3.copy(center);
+        if (sameShape && !fits) {
+          // The view drifted out of a tile that is otherwise still valid:
+          // lead the new box along the drift across the light (drift along
+          // the light stays inside the box's depth range).
+          final drift = center - entry.idealCenter;
+          drift.addScaled(dir, -drift.dot(dir));
+          final length = drift.length;
+          if (length > ideal.radius * 1e-6) {
+            boxCenter.addScaled(
+              drift,
+              ideal.radius * (slackFactor - 1.0) * leadFraction / length,
+            );
+          }
+        }
+        entry.center.setFrom(boxCenter);
+        entry.idealCenter.setFrom(center);
         entry.radius = ideal.radius;
         entry.boxSize = ideal.radius * slackFactor * 2.0;
         entry.matrix.setFrom(
           light.cascadeLightSpaceMatrix(
             dir,
-            center,
+            boxCenter,
             ideal.radius * slackFactor,
           ),
         );
@@ -211,5 +253,31 @@ class DirectionalShadowCache {
       );
     }
     return ShadowCachePlan(effective, refreshes, _entries, this);
+  }
+
+  /// Whether the sphere ([center], [radius]) lies inside the light-clip box
+  /// of a tile rendered with [matrix] (x and y in -1..1, depth in 0..1).
+  ///
+  /// The test runs in the tile's own (texel-snapped) light space, so it is
+  /// exact for the box the tile covers: drift along the light only has to
+  /// stay inside the box's depth range, and drift toward a corner may go as
+  /// far as the square allows.
+  static bool sphereInsideTile(Matrix4 matrix, Vector3 center, double radius) {
+    final s = matrix.storage;
+    double extent(int row) =>
+        radius *
+        math.sqrt(
+          s[row] * s[row] + s[row + 4] * s[row + 4] + s[row + 8] * s[row + 8],
+        );
+    double project(int row) =>
+        s[row] * center.x +
+        s[row + 4] * center.y +
+        s[row + 8] * center.z +
+        s[row + 12];
+    final x = project(0), y = project(1), z = project(2);
+    return x.abs() + extent(0) <= 1.0 &&
+        y.abs() + extent(1) <= 1.0 &&
+        z - extent(2) >= 0.0 &&
+        z + extent(2) <= 1.0;
   }
 }

@@ -1,3 +1,7 @@
+import 'dart:math' as math;
+
+// ignore: implementation_imports
+import 'package:flutter_scene/src/camera.dart';
 import 'package:flutter_test/flutter_test.dart';
 // ignore: implementation_imports
 import 'package:flutter_scene/src/light.dart';
@@ -119,6 +123,123 @@ void main() {
     final p = plan(idealCascades());
     expect(p.refreshes.length, 2);
   });
+
+  test('drift along the light keeps the cached tiles', () {
+    plan(idealCascades());
+    // Half the near cascade's radius toward the light, far past the slack
+    // but inside the tile's deep depth range.
+    final along = light.direction.normalized() * 3.0;
+    final p = plan(idealCascades(offset: along));
+    expect(p.refreshes, isEmpty);
+    expect(
+      DirectionalShadowCache.sphereInsideTile(
+        p.cascades[0].lightSpaceMatrix,
+        Vector3(0, 0, 5) + along,
+        6.0,
+      ),
+      isTrue,
+    );
+  });
+
+  test('a tile is usable exactly while the ideal sphere lies in its box', () {
+    final m = light.cascadeLightSpaceMatrix(
+      light.direction.normalized(),
+      Vector3.zero(),
+      6.0 * DirectionalShadowCache.slackFactor,
+    );
+    // Across the light: the box's half side is the slack radius.
+    final dir = light.direction.normalized();
+    final across = Vector3(dir.z, 0, -dir.x).normalized();
+    final room = 6.0 * (DirectionalShadowCache.slackFactor - 1.0);
+    bool inside(Vector3 c) =>
+        DirectionalShadowCache.sphereInsideTile(m, c, 6.0);
+    expect(inside(Vector3.zero()), isTrue);
+    expect(inside(across * (room * 0.99)), isTrue);
+    expect(inside(across * (room * 1.01)), isFalse);
+    // Away from the light the depth range ends 2 slack radii past the center.
+    final depthRoom = 2.0 * 6.0 * DirectionalShadowCache.slackFactor - 6.0;
+    expect(inside(dir * (depthRoom * 0.99)), isTrue);
+    expect(inside(dir * (depthRoom * 1.01)), isFalse);
+  });
+
+  test('steady drift across the light leads the re-rendered tile', () {
+    final dir = light.direction.normalized();
+    final across = Vector3(dir.z, 0, -dir.x).normalized();
+    plan(idealCascades());
+    final room = 6.0 * (DirectionalShadowCache.slackFactor - 1.0);
+    const steps = 400;
+    final step = room * 0.05;
+    var nearRefreshes = 0;
+    for (var i = 1; i <= steps; i++) {
+      final offset = across * (step * i);
+      final p = plan(idealCascades(offset: offset));
+      nearRefreshes += p.refreshes.where((r) => r.cascadeIndex == 0).length;
+      // Coverage never lapses: the sphere every fragment of the cascade lies
+      // in stays inside the tile it samples.
+      expect(
+        DirectionalShadowCache.sphereInsideTile(
+          p.cascades[0].lightSpaceMatrix,
+          Vector3(0, 0, 5) + offset,
+          6.0,
+        ),
+        isTrue,
+        reason: 'step $i',
+      );
+    }
+    // A centered tile refreshes every `room` of travel (20 refreshes over
+    // 20 rooms); a led one crosses 1 + leadFraction rooms per refresh.
+    final travel = step * steps / room;
+    expect(
+      nearRefreshes,
+      lessThanOrEqualTo(
+        (travel / (1.0 + DirectionalShadowCache.leadFraction)).ceil() + 1,
+      ),
+    );
+  });
+
+  test(
+    'an orbiting camera keeps every cascade covered with fewer refreshes',
+    () {
+      light
+        ..direction = Vector3(-0.4, -0.7, -0.5).normalized()
+        ..shadowMapResolution = 2048
+        ..shadowCascadeCount = 3
+        ..shadowMaxDistance = 60.0
+        ..firstCascadeFarBound = 12.0;
+      const distance = 20.0;
+      var refreshes = 0;
+      const frames = 360;
+      for (var f = 0; f <= frames; f++) {
+        final yaw = f * degrees2Radians;
+        final camera = PerspectiveCamera(
+          position: Vector3(
+            distance * 0.8 * math.cos(yaw),
+            distance * 0.6,
+            distance * 0.8 * math.sin(yaw),
+          ),
+          target: Vector3.zero(),
+        );
+        final ideal = light.computeCascades(camera, 16 / 9);
+        final p = plan(ideal);
+        if (f > 0) refreshes += p.refreshes.length;
+        for (var c = 0; c < ideal.length; c++) {
+          expect(
+            DirectionalShadowCache.sphereInsideTile(
+              p.cascades[c].lightSpaceMatrix,
+              ideal[c].center!,
+              ideal[c].radius,
+            ),
+            isTrue,
+            reason: 'frame $f cascade $c',
+          );
+        }
+      }
+      // The centered-tile rule with a 3D-distance test refreshed 68 tiles over
+      // this orbit with the same slack; the exact box test alone gives 54, and
+      // leading the re-rendered tile 35.
+      expect(refreshes, lessThanOrEqualTo(40));
+    },
+  );
 
   test('a shadow-caster channel change rebuilds everything', () {
     plan(idealCascades());

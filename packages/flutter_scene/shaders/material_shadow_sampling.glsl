@@ -130,10 +130,13 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
   // in the generated GLES source even though the choice is uniform.
   float filter_index = frag_info.directional_light_direction.w;
   float fixed_filter = step(0.5, filter_index) * (1.0 - step(1.5, filter_index));
-  // The fixed grid does not rotate, so it skips the noise, cosine, and sine.
+  // Only the Poisson kernels (rotated Poisson and the PCSS blocker search and
+  // filter) rotate per fragment. The fixed grid and the bilinear PCF kernel do
+  // not, so they skip the noise, cosine, and sine; the bilinear filter's
+  // corner probe then sits on the unrotated kernel diagonals.
   float ca = 1.0;
   float sa = 0.0;
-  if (fixed_filter < 0.5) {
+  if (filter_index < 0.5 || (filter_index > 1.5 && filter_index < 2.5)) {
     highp float noise = fract(
         52.9829189 *
         fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));

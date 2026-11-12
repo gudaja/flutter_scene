@@ -295,30 +295,32 @@ float SampleShadow(highp vec3 world_pos, vec3 n) {
       // the loop has a single exit.
       if (weight < 1.0) {
         highp vec4 pos = vec4(biased_world_pos, 1.0);
+        // Cascades are orthographic (light.dart's _cascadeLightSpaceMatrix and
+        // the shadow cache's snapped copies keep the bottom row 0, 0, 0, 1), so
+        // clip w is 1: take xyz and skip the w row and the divide.
 #if defined(IMPELLER_TARGET_METAL) || defined(IMPELLER_TARGET_VULKAN)
-        highp vec4 light_clip = frag_info.light_space_matrix[i] * pos;
+        highp vec3 proj = (frag_info.light_space_matrix[i] * pos).xyz;
         highp float box = frag_info.cascade_box_sizes[i];
 #else
         // Literal indices, since some GLES drivers misread a dynamically
         // indexed uniform array. Each branch transforms by its own matrix,
         // so a GPU that flattens the branches still reads only one.
-        highp vec4 light_clip;
+        highp vec3 proj;
         highp float box;
         if (i == 0) {
-          light_clip = frag_info.light_space_matrix[0] * pos;
+          proj = (frag_info.light_space_matrix[0] * pos).xyz;
           box = frag_info.cascade_box_sizes[0];
         } else if (i == 1) {
-          light_clip = frag_info.light_space_matrix[1] * pos;
+          proj = (frag_info.light_space_matrix[1] * pos).xyz;
           box = frag_info.cascade_box_sizes[1];
         } else if (i == 2) {
-          light_clip = frag_info.light_space_matrix[2] * pos;
+          proj = (frag_info.light_space_matrix[2] * pos).xyz;
           box = frag_info.cascade_box_sizes[2];
         } else {
-          light_clip = frag_info.light_space_matrix[3] * pos;
+          proj = (frag_info.light_space_matrix[3] * pos).xyz;
           box = frag_info.cascade_box_sizes[3];
         }
 #endif
-        highp vec3 proj = light_clip.xyz / light_clip.w;
         highp vec2 uv = proj.xy * 0.5 + 0.5;
         highp float margin =
             max(frag_info.shadow_softness / box, frag_info.shadow_texel_size);

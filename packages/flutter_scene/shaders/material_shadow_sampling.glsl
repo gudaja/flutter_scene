@@ -18,7 +18,7 @@
 // already applied) and the tile's atlas-x origin `x0`; a tap then only adds,
 // clamps and scales. Samples stay a texel inside the tile, which also protects
 // the boundary if a custom backend applies filtering to the atlas.
-highp vec2 ShadowTileTap(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t) {
+highp vec2 ShadowTileTap(vec2 p, vec2 bx, vec2 by, highp vec2 t) {
   return clamp(t + p.x * bx + p.y * by, vec2(frag_info.shadow_texel_size),
                vec2(1.0 - frag_info.shadow_texel_size));
 }
@@ -26,13 +26,13 @@ highp vec2 ShadowTileTap(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t) {
 // One rotated Poisson-disk PCF tap into a cascade's atlas tile.
 // Samples the caster depth for the soft-shadow blocker search, with the
 // same tile mapping as ShadowTap and no comparison.
-highp float ShadowTapDepth(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t,
+highp float ShadowTapDepth(vec2 p, vec2 bx, vec2 by, highp vec2 t,
                            highp float x0, highp float inv_count) {
   highp vec2 tt = ShadowTileTap(p, bx, by, t);
   return textureLod(shadow_map, vec2(tt.x * inv_count + x0, tt.y), 0.0).r;
 }
 
-float ShadowTap(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t,
+float ShadowTap(vec2 p, vec2 bx, vec2 by, highp vec2 t,
                 highp float x0, highp float inv_count,
                 highp float receiver_depth) {
   highp vec2 tt = ShadowTileTap(p, bx, by, t);
@@ -45,7 +45,7 @@ float ShadowTap(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t,
 // shadow texels and continuously interpolates the depth tests across fractional
 // texels, producing smooth analog penumbras without noise rotation or stepping.
 // `bx`/`by` are the unrotated basis here (the bilinear kernel never rotates).
-float ShadowTapBilinear(vec2 p, highp vec2 bx, highp vec2 by, highp vec2 t,
+float ShadowTapBilinear(vec2 p, vec2 bx, vec2 by, highp vec2 t,
                         highp float x0, highp float inv_count,
                         highp float receiver_depth) {
   highp vec2 tile_tex =
@@ -194,8 +194,11 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
   // penumbra), which cuts the shadow-map reads on texture-rate-bound GPUs.
   // PCSS keeps its own path, since its blocker search sizes the kernel.
   bool settled = false;
-  highp vec2 bx = ux * radius;
-  highp vec2 by = uy * radius;
+  // The basis spans a few texels (radius >= one texel, 1/2048 and up), so
+  // half precision keeps it to well under a texel; the sum with the highp
+  // receiver position stays highp.
+  vec2 bx = ux * radius;
+  vec2 by = uy * radius;
   if (filter_index < 1.5 || filter_index > 2.5) {
     float probe =
         ShadowTap(vec2(0.0), bx, by, t, x0, inv_count, receiver_depth) +
@@ -251,9 +254,14 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
 // return so no loop is emitted here (see SampleShadow); the ramp's width is
 // floored to keep smoothstep well defined when it is unused.
 float CascadeBlendWeight(highp vec2 uv, highp float margin, highp float band) {
-  highp vec2 low = vec2(margin);
-  highp vec2 high = vec2(margin + max(band, 1e-4));
-  vec2 ramp = smoothstep(low, high, uv) * smoothstep(low, high, vec2(1.0) - uv);
+  // The ramps run on the distances past the margin, small numbers that half
+  // precision holds to well under the ramp width; far from the edges a ramp
+  // saturates at 1 whatever the rounding.
+  vec2 near_edge = uv - vec2(margin);
+  vec2 far_edge = vec2(1.0 - margin) - uv;
+  float width = max(band, 1e-4);
+  vec2 ramp = smoothstep(vec2(0.0), vec2(width), near_edge) *
+              smoothstep(vec2(0.0), vec2(width), far_edge);
   return band > 0.0 ? ramp.x * ramp.y : 1.0;
 }
 

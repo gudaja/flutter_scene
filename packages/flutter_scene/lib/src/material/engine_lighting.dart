@@ -75,6 +75,7 @@ class EngineLightingUniforms {
     double modelScaleX = 1.0,
     double modelScaleY = 1.0,
     double modelScaleZ = 1.0,
+    bool receivesContactShadows = true,
   }) {
     // Default to fully drawn; a material with an active LOD cross-fade
     // overwrites this. Without it the zero-initialized slot would discard
@@ -195,7 +196,9 @@ class EngineLightingUniforms {
     fragInfo[164] = lighting.ssaoDirectLightAffect.clamp(0.0, 1.0);
     fragInfo[165] = lighting.ssaoMultiBounce.clamp(0.0, 1.0);
     fragInfo[166] = lighting.ssaoBentNormals ? 1.0 : 0.0;
-    fragInfo[167] = lighting.ssaoContactShadows ? 1.0 : 0.0;
+    fragInfo[167] = lighting.ssaoContactShadows && receivesContactShadows
+        ? 1.0
+        : 0.0;
     // model_scale at [168..170]: the draw's model scale, set by the encoder
     // on the material before bind (replaces the old v_model_scale varying).
     fragInfo[168] = modelScaleX;

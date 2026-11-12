@@ -332,6 +332,15 @@ abstract class Material {
   @internal
   double lodFade = 1.0;
 
+  /// Whether the sun's screen-space contact shadow
+  /// ([DirectionalLight.contactShadows]) darkens this material. Defaults to
+  /// true. Turn it off for thin, dense, alpha-tested geometry such as grass
+  /// cards: the contact march treats every depth sample in front of the ray
+  /// as a solid slab (its thickness window), so neighbouring cards, and the
+  /// card itself at a grazing sun, shadow sun-lit blades almost completely.
+  /// The cascaded shadow map still applies.
+  bool receivesContactShadows = true;
+
   /// Whether this material cross-fades between levels of detail. An opaque
   /// draw of one that is mid-fade takes the coverage pre-draw, which dithers
   /// it against the adjacent level. The built-in lit and unlit materials do.

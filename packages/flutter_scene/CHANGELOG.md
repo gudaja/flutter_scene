@@ -18,6 +18,7 @@
 * Lit materials on Windows (ANGLE) get their specular anti-aliasing back, and normal maps on meshes without tangents are no longer flattened.
 * Loading a shader library again under the same asset key keeps its shader reflection, so a later `ShaderMaterial` no longer re-parses the bundle or skips its first draws.
 * A widget test no longer fails with "A Timer is still pending" when it ends while a scene waits on the raster thread.
+* `Texture2D.fromImage`, and so `Texture2D.fromEncodedBytes`, `fromAsset` and glTF image imports, build a texture's mip chain on a background isolate instead of on the UI isolate. Loading a scene's worth of 512 and 1024 px textures on a Redmi 24117RN76E (Helio G99) kept the UI isolate blocked for 2.2 to 3.7 s less.
 * A `RenderTexture` view no longer freezes while the GPU is a frame behind and a screen view renders anyway, such as after a resize.
 * The depth prepass writes a single-channel `r32Float` target when no pass needs normals, a quarter of the memory and bandwidth. `RenderPassContext.sceneDepthLinear` keeps four channels when normals are written.
 * Shader bundle reflection parses about 10x faster by copying each backend's output on its first read, so a `ShaderMaterial` on Apple platforms waits far less before its first draw.

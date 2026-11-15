@@ -124,7 +124,7 @@ void _downsampleColor(
                 _srgbToLinearTable[src[c + ch]] +
                 _srgbToLinearTable[src[d + ch]]) *
             0.25;
-        dst[o + ch] = _linearToSrgb(avg);
+        dst[o + ch] = linearToSrgbByte(avg);
       }
       dst[o + 3] =
           ((src[a + 3] + src[b + 3] + src[c + 3] + src[d + 3]) + 2) ~/ 4;
@@ -227,11 +227,90 @@ double _srgbToLinear(int byte) {
       : math.pow((c + 0.055) / 1.055, 2.4).toDouble();
 }
 
-int _linearToSrgb(double linear) {
+/// The sRGB byte of a linear-light value, by the reference formula (a `pow`
+/// per call). [linearToSrgbByte] returns the same byte without the `pow`.
+int linearToSrgbByteReference(double linear) {
   final c = linear <= 0.0031308
       ? linear * 12.92
       : 1.055 * math.pow(linear, 1 / 2.4).toDouble() - 0.055;
   return (c * 255.0).round().clamp(0, 255);
+}
+
+/// The sRGB byte of a non-negative linear-light value, equal to
+/// [linearToSrgbByteReference] for every input it is given.
+///
+/// The reference rounds a monotonic curve, so its byte steps from k - 1 to k
+/// at one point per k (the smallest double it maps to k or above, found by
+/// bisecting the double bit patterns). [_srgbBuckets] equal slices of [0, 1]
+/// each hold at most one such step, so the byte is the slice's starting byte
+/// plus one past its step: a multiply and a compare instead of a `pow`, the
+/// bulk of a color mip chain's cost. Inputs above 1 map to 255, as the
+/// reference does.
+@pragma('vm:prefer-inline')
+int linearToSrgbByte(double linear) {
+  if (!(linear < 1.0)) return linearToSrgbByteReference(linear);
+  final i = (linear * _srgbBuckets).toInt();
+  // The step table first: building it fills the byte table.
+  final step = _srgbBucketStep[i];
+  final base = _srgbBucketByte[i];
+  return linear >= step ? base + 1 : base;
+}
+
+const int _srgbBuckets = 4096;
+
+/// The reference byte at the start of each slice of [linearToSrgbByte].
+final Uint8List _srgbBucketByte = Uint8List(_srgbBuckets);
+
+/// The step inside each slice of [linearToSrgbByte] (infinity when none).
+final Float64List _srgbBucketStep = _buildSrgbBuckets();
+
+Float64List _buildSrgbBuckets() {
+  final thresholds = _buildSrgbByteThresholds();
+  final steps = Float64List(_srgbBuckets)
+    ..fillRange(0, _srgbBuckets, double.infinity);
+  var k = 0; // thresholds below the current slice's start
+  for (var i = 0; i < _srgbBuckets; i++) {
+    final start = i / _srgbBuckets;
+    final end = (i + 1) / _srgbBuckets;
+    while (k < 255 && thresholds[k] <= start) {
+      k++;
+    }
+    _srgbBucketByte[i] = k;
+    if (k < 255 && thresholds[k] < end) {
+      steps[i] = thresholds[k];
+      if (k + 1 < 255 && thresholds[k + 1] < end) {
+        throw StateError('two sRGB steps in slice $i of $_srgbBuckets');
+      }
+    }
+  }
+  return steps;
+}
+
+/// The reference's step points: entry k - 1 is the smallest non-negative
+/// double it maps to byte k or above.
+Float64List _buildSrgbByteThresholds() {
+  final bits = ByteData(8);
+  double fromBits(int b) => (bits..setInt64(0, b)).getFloat64(0);
+  final two = (bits..setFloat64(0, 2.0)).getInt64(0);
+  final out = Float64List(255);
+  var lo0 = 0; // the reference maps lo0 below every byte still to find
+  for (var k = 1; k < 256; k++) {
+    // Positive doubles order like their bit patterns; the reference maps 0.0
+    // to 0 and 2.0 to 255, so the invariant ref(lo) < k <= ref(hi) holds.
+    var lo = lo0;
+    var hi = two;
+    while (hi - lo > 1) {
+      final mid = lo + ((hi - lo) >> 1);
+      if (linearToSrgbByteReference(fromBits(mid)) >= k) {
+        hi = mid;
+      } else {
+        lo = mid;
+      }
+    }
+    out[k - 1] = fromBits(hi);
+    lo0 = lo;
+  }
+  return out;
 }
 
 // Maps a [-1, 1] component to a [0, 255] byte.

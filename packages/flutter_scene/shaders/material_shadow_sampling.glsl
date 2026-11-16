@@ -181,7 +181,12 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
   // penumbra), which cuts the shadow-map reads on texture-rate-bound GPUs.
   // PCSS keeps its own path, since its blocker search sizes the kernel.
   bool settled = false;
-  if (filter_index < 1.5 || filter_index > 2.5) {
+  if (frag_info.casts_shadow > 2.5) {
+    // WR-74 diagnostic: one center tap.
+    shadow = ShadowTap(vec2(0.0), ca, sa, radius, uv, cascade, inv_count,
+                       receiver_depth);
+    settled = true;
+  } else if (filter_index < 1.5 || filter_index > 2.5) {
     float probe =
         ShadowTap(vec2(0.0), ca, sa, radius, uv, cascade, inv_count,
                   receiver_depth) +
@@ -193,7 +198,8 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
                   receiver_depth) +
         ShadowTap(vec2(1.0, 1.0), ca, sa, radius, uv, cascade, inv_count,
                   receiver_depth);
-    settled = probe < 0.5 || probe > 4.5;
+    // casts_shadow 2: WR-74 diagnostic, the probes only.
+    settled = probe < 0.5 || probe > 4.5 || frag_info.casts_shadow > 1.5;
     shadow = probe * 0.2;
   }
   if (settled) {

@@ -1580,6 +1580,7 @@ class PhysicallyBasedMaterial extends Material {
         ..depthLayer = depthLayer
         ..lodFade = lodFade
         ..receivesContactShadows = receivesContactShadows
+        ..shadowSamplingMode = shadowSamplingMode
         ..lightListOffset = lightListOffset
         ..lightListCount = lightListCount
         ..lightChannelMask = lightChannelMask
@@ -1627,6 +1628,7 @@ class PhysicallyBasedMaterial extends Material {
       modelScaleY: modelScaleY,
       modelScaleZ: modelScaleZ,
       receivesContactShadows: receivesContactShadows,
+      shadowSamplingMode: shadowSamplingMode,
     );
     fragInfo[0] = baseColorFactor.r;
     fragInfo[1] = baseColorFactor.g;

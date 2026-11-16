@@ -284,6 +284,7 @@ class PreprocessedMaterial extends Material implements HotReloadableFmat {
       modelScaleY: modelScaleY,
       modelScaleZ: modelScaleZ,
       receivesContactShadows: receivesContactShadows,
+      shadowSamplingMode: shadowSamplingMode,
     );
     // radiance_blend.zw [162]/[163]: this item's punctual-light slice
     // (count, offset) into the per-frame light-index buffer.

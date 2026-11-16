@@ -341,6 +341,13 @@ abstract class Material {
   /// The cascaded shadow map still applies.
   bool receivesContactShadows = true;
 
+  /// How this material samples the directional shadow map (WR-74): 0 the
+  /// light's filter; 2 the five probe taps only (no penumbra kernel); 3 one
+  /// center tap. Cheaper receivers for dense alpha-tested cards such as grass,
+  /// whose blade shadows put most of their fragments in the penumbra.
+  /// [debugShadowSamplingMode] overrides it when non-zero.
+  int shadowSamplingMode = 0;
+
   /// Whether this material cross-fades between levels of detail. An opaque
   /// draw of one that is mid-fade takes the coverage pre-draw, which dithers
   /// it against the adjacent level. The built-in lit and unlit materials do.

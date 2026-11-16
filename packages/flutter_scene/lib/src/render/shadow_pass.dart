@@ -51,6 +51,12 @@ class SpotShadowInfo {
   final int tileResolution;
 }
 
+/// Diagnostic (WR-74): how the lit shaders sample the directional shadow.
+/// 0 = normal; 1 = skip the lookup (shadow variant still bound, reads lit);
+/// 2 = the five probe taps only (no penumbra kernel); 3 = one center tap.
+/// Modes 1-3 change the image and exist only to split the per-pixel cost.
+int debugShadowSamplingMode = 0;
+
 /// Forces every view to render its own spot and point shadow tiles, so
 /// parity tests can render the same frame with and without sharing.
 bool debugDisableSharedShadowTiles = false;

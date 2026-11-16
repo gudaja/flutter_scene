@@ -11,6 +11,8 @@ import 'package:flutter_scene/src/material/material.dart';
 import 'package:flutter_scene/src/material/physically_based_material.dart'
     show TextureTransform;
 import 'package:flutter_scene/src/render/custom_render_pass.dart';
+import 'package:flutter_scene/src/render/shadow_pass.dart'
+    show debugShadowSamplingMode;
 import 'package:flutter_scene/src/render/frame_transients.dart';
 import 'package:flutter_scene/src/render/irradiance_field.dart';
 import 'package:flutter_scene/src/render/uniform_slots.dart';
@@ -76,6 +78,7 @@ class EngineLightingUniforms {
     double modelScaleY = 1.0,
     double modelScaleZ = 1.0,
     bool receivesContactShadows = true,
+    int shadowSamplingMode = 0,
   }) {
     // Default to fully drawn; a material with an active LOD cross-fade
     // overwrites this. Without it the zero-initialized slot would discard
@@ -148,7 +151,17 @@ class EngineLightingUniforms {
     }
     fragInfo[126] = lighting.environmentIntensity;
     fragInfo[127] = light != null ? 1.0 : 0.0;
-    fragInfo[128] = cascades.isEmpty ? 0.0 : 1.0;
+    // casts_shadow; > 1.5 selects a WR-74 diagnostic sampling mode.
+    fragInfo[128] = cascades.isEmpty
+        ? 0.0
+        : switch (debugShadowSamplingMode != 0
+              ? debugShadowSamplingMode
+              : shadowSamplingMode) {
+            1 => 0.0,
+            2 => 2.0,
+            3 => 3.0,
+            _ => 1.0,
+          };
     fragInfo[129] = light?.shadowDepthBias ?? 0.0;
     fragInfo[130] = light?.shadowNormalBias ?? 0.0;
     fragInfo[131] = light == null ? 0.0 : 1.0 / light.shadowMapResolution;

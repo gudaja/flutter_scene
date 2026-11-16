@@ -3499,6 +3499,8 @@ base class Scene implements SceneGraph {
           casterChannelMask: cascades.isNotEmpty
               ? light!.shadowCasterChannelMask
               : 0xFF,
+          siteShadow: cascades.isNotEmpty && light!.shadowSiteBounds != null,
+          siteMinCasterSize: light?.shadowSiteMinCasterSize ?? 0.0,
           cameraPosition: camera.position,
           spotShadows: spotShadowFrame,
           pointShadows: pointShadowFrame,

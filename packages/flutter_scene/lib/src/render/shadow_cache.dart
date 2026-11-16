@@ -187,14 +187,21 @@ class DirectionalShadowCache {
       if (refresh) {
         entry.center.setFrom(center);
         entry.radius = ideal.radius;
-        entry.boxSize = ideal.radius * slackFactor * 2.0;
-        entry.matrix.setFrom(
-          light.cascadeLightSpaceMatrix(
-            dir,
-            center,
-            ideal.radius * slackFactor,
-          ),
-        );
+        if (light.shadowSiteBounds != null) {
+          // A site tile is fit to fixed bounds, not the camera, so it needs
+          // no slack: its ideal tile is the one to cache.
+          entry.boxSize = ideal.boxSize;
+          entry.matrix.setFrom(ideal.lightSpaceMatrix);
+        } else {
+          entry.boxSize = ideal.radius * slackFactor * 2.0;
+          entry.matrix.setFrom(
+            light.cascadeLightSpaceMatrix(
+              dir,
+              center,
+              ideal.radius * slackFactor,
+            ),
+          );
+        }
         entry.renderedSignature = staticSignature;
         entry.direction.setFrom(dir);
         entry.hasContent = true;

@@ -51,6 +51,22 @@
     "type": "fragment",
     "file": "shaders/flutter_scene_standard_lightmap_cube.frag"
   },
+  "StandardSiteFragment": {
+    "type": "fragment",
+    "file": "shaders/flutter_scene_standard_site.frag"
+  },
+  "StandardSiteCubeFragment": {
+    "type": "fragment",
+    "file": "shaders/flutter_scene_standard_site_cube.frag"
+  },
+  "ShadowSiteDepthFragment": {
+    "type": "fragment",
+    "file": "shaders/flutter_scene_shadow_site_depth.frag"
+  },
+  "ShadowSiteDepthMaskedFragment": {
+    "type": "fragment",
+    "file": "shaders/flutter_scene_shadow_site_depth_masked.frag"
+  },
   "StandardNoShadowFragment": {
     "type": "fragment",
     "file": "shaders/flutter_scene_standard_no_shadow.frag"

@@ -781,8 +781,9 @@ highp vec4 EvaluateLighting(MaterialInputs material) {
         }
 #endif
         // Spot shadow, when this spot has a slot in the shared atlas. Gate on
-        // the geometric normal (the shadow is a geometric property).
-#ifndef FLUTTER_SCENE_SKIP_SHADOWS
+        // the geometric normal (the shadow is a geometric property). A site
+        // shadow twin is only drawn with no spot or point tiles (WR-77).
+#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && !defined(FLUTTER_SCENE_SITE_SHADOW)
         if (cone > 0.0 && l3.y > -0.5 &&
             frag_info.spot_shadow_params.x > 0.5) {
           float spot_shadow = SampleSpotShadow(
@@ -794,7 +795,8 @@ highp vec4 EvaluateLighting(MaterialInputs material) {
         }
 #endif
       }
-#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && !defined(FLUTTER_SCENE_LEAN_LIGHTING)
+#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && \
+    !defined(FLUTTER_SCENE_LEAN_LIGHTING) && !defined(FLUTTER_SCENE_SITE_SHADOW)
       else if (type > 0.5 && l3.y > -0.5 &&
                frag_info.spot_shadow_params.x > 0.5) {
         // Point shadow, when this light's cube faces ride the shared atlas

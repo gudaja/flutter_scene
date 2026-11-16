@@ -141,6 +141,7 @@ class DirectionalLight {
     this.angularRadius = 0.005,
     this.channelMask = 0xFF,
     this.shadowCasterChannelMask = 0xFF,
+    this.shadowSiteBounds,
   }) : direction = direction ?? defaultDirection,
        color = color ?? Vector3(1.0, 1.0, 1.0);
 
@@ -231,6 +232,27 @@ class DirectionalLight {
   /// cost a second cascade lookup.
   /// {@category Lighting and environment}
   double cascadeOverlap;
+
+  /// A fixed world-space box the whole shadow map covers (a "site" shadow
+  /// map), or null (the default) for camera-fitted cascades.
+  ///
+  /// When set, [computeCascades] returns one cascade whose orthographic tile
+  /// is fit tightly around this box as seen from the light, independent of
+  /// the camera, so with [cacheStaticShadows] its static content renders
+  /// only when the light turns or the static casters change, never while the
+  /// camera moves. Lit materials that carry a site twin then sample it with a
+  /// compact lookup (one matrix, no cascade selection, normal-offset, or
+  /// distance fade), and the shadow pass adds a slope-scaled caster bias.
+  /// [shadowCascadeCount], [shadowMaxDistance], [firstCascadeFarBound] and
+  /// [cascadeOverlap] are ignored. Surfaces outside the box read as lit.
+  /// {@category Lighting and environment}
+  Aabb3? shadowSiteBounds;
+
+  /// With [shadowSiteBounds], casters whose world bounding box is smaller
+  /// than this on every axis cast no shadow into the site map (small props
+  /// and tufts, as Abyssal Garden drops pebbles on its lower tiers). `0`
+  /// (the default) keeps every caster. Ignored for camera-fitted cascades.
+  double shadowSiteMinCasterSize = 0.0;
 
   /// Pixel resolution of the (square) shadow map. With cascades this is
   /// the resolution of each cascade's tile.
@@ -335,6 +357,17 @@ class DirectionalLight {
     double aspectRatio, [
     Vector3? worldDirection,
   ]) {
+    final site = shadowSiteBounds;
+    if (site != null) {
+      final effective = worldDirection ?? direction;
+      final length = effective.length;
+      return [
+        siteCascade(
+          length == 0.0 ? Vector3(0.0, -1.0, 0.0) : effective / length,
+          site,
+        ),
+      ];
+    }
     // The unit-height view carries the aspect ratio; a projection the renderer
     // bound to its view ignores it.
     final projection = ProjectionParams.of(
@@ -465,6 +498,88 @@ class DirectionalLight {
   // must match: (12 + 2) / 2 = 7.
   static const double _casterReachRadii = 12.0;
   static const double _forwardMarginRadii = 2.0;
+
+  /// The single cascade of a site shadow map ([shadowSiteBounds]): an
+  /// orthographic tile fit to [bounds]' eight corners in the light's basis
+  /// for the unit travel direction [lightDir]. The depth range starts just
+  /// toward the sun of the nearest corner and spans `7 * boxSize` (boxSize =
+  /// the larger tile side), the same depth-to-box ratio as the camera
+  /// cascades, so the shader's world-space depth-bias conversion holds.
+  @internal
+  ShadowCascade siteCascade(Vector3 lightDir, Aabb3 bounds) {
+    final fx = lightDir.x;
+    final fy = lightDir.y;
+    final fz = lightDir.z;
+    final useZUp = fy.abs() > 0.99;
+    final rx0 = useZUp ? -fy : fz;
+    final ry0 = useZUp ? fx : 0.0;
+    final rz0 = useZUp ? 0.0 : -fx;
+    final inverseRightLength =
+        1.0 / math.sqrt(rx0 * rx0 + ry0 * ry0 + rz0 * rz0);
+    final rx = rx0 * inverseRightLength;
+    final ry = ry0 * inverseRightLength;
+    final rz = rz0 * inverseRightLength;
+    final ux = fy * rz - fz * ry;
+    final uy = fz * rx - fx * rz;
+    final uz = fx * ry - fy * rx;
+    var minR = double.infinity, maxR = -double.infinity;
+    var minU = double.infinity, maxU = -double.infinity;
+    var minF = double.infinity;
+    final lo = bounds.min, hi = bounds.max;
+    for (var i = 0; i < 8; i++) {
+      final x = (i & 1) == 0 ? lo.x : hi.x;
+      final y = (i & 2) == 0 ? lo.y : hi.y;
+      final z = (i & 4) == 0 ? lo.z : hi.z;
+      final r = rx * x + ry * y + rz * z;
+      final u = ux * x + uy * y + uz * z;
+      final f = fx * x + fy * y + fz * z;
+      minR = math.min(minR, r);
+      maxR = math.max(maxR, r);
+      minU = math.min(minU, u);
+      maxU = math.max(maxU, u);
+      minF = math.min(minF, f);
+    }
+    // One texel of margin each side keeps the outermost casters off the
+    // clamped border texels.
+    final res = shadowMapResolution.toDouble();
+    final w0 = math.max(maxR - minR, 1e-3);
+    final h0 = math.max(maxU - minU, 1e-3);
+    final w = w0 * (res + 2.0) / res;
+    final h = h0 * (res + 2.0) / res;
+    final box = math.max(w, h);
+    final cr = (minR + maxR) * 0.5;
+    final cu = (minU + maxU) * 0.5;
+    final near = minF - box * 0.05;
+    final sx = 2.0 / w;
+    final sy = 2.0 / h;
+    final sz = 1.0 / (7.0 * box);
+    final matrix = Matrix4(
+      rx * sx,
+      ux * sy,
+      fx * sz,
+      0.0, //
+      ry * sx,
+      uy * sy,
+      fy * sz,
+      0.0, //
+      rz * sx,
+      uz * sy,
+      fz * sz,
+      0.0, //
+      -cr * sx,
+      -cu * sy,
+      -near * sz,
+      1.0, //
+    );
+    final center = bounds.center;
+    return ShadowCascade(
+      lightSpaceMatrix: matrix,
+      splitDistance: double.maxFinite,
+      boxSize: box,
+      center: center,
+      radius: (hi - lo).length * 0.5,
+    );
+  }
 
   /// The world -> light-clip matrix for a cascade covering the sphere
   /// ([center], [radius]); see [_cascadeLightSpaceMatrix]. The shadow cache
@@ -1104,6 +1219,19 @@ class Lighting {
   /// The rect area lights packed into the punctual light data this frame.
   @internal
   final int rectAreaLightCount;
+
+  /// Whether this frame's directional shadow is a site shadow map
+  /// ([DirectionalLight.shadowSiteBounds]): one fixed cascade in [shadowMap],
+  /// which a material with a site twin samples with the compact lookup. The
+  /// twin compiles spot and point shadows out, so a frame with either tile
+  /// keeps the full shaders.
+  @internal
+  bool get siteShadow =>
+      shadowMap != null &&
+      cascades.length == 1 &&
+      spotShadowCount == 0 &&
+      pointShadowTileCount == 0 &&
+      directionalLight?.shadowSiteBounds != null;
 
   /// Whether every feature the lean lit entries compile out is off this frame
   /// (see `FLUTTER_SCENE_LEAN_LIGHTING` in `material_lighting.glsl`), so a

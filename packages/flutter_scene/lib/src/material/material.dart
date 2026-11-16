@@ -423,6 +423,7 @@ abstract class Material {
     _noShadowRadianceCubeFragmentShader = null;
     _noShadowRadianceCubeFragmentShaderName = null;
     _leanShaders = null;
+    _siteShaders = null;
   }
 
   /// Assigns the fragment shader by [name] from [baseShaderLibrary].
@@ -454,6 +455,22 @@ abstract class Material {
     _noShadowRadianceCubeFragmentShaderName = noShadowCubeName;
     _noShadowRadianceCubeFragmentShader = null;
     _leanShaders = null;
+    _siteShaders = null;
+  }
+
+  _SiteShadowFragmentShaders? _siteShaders;
+
+  /// Assigns the `FLUTTER_SCENE_SITE_SHADOW` twins of the full and cube
+  /// entries named by [setFragmentShaderName] (WR-77), by name from
+  /// [baseShaderLibrary]. Call after [setFragmentShaderName], which clears
+  /// them. Drawn instead of the full entries while the frame's shadow is a
+  /// site shadow map ([Lighting.siteShadow]); same binding interface.
+  @internal
+  void setSiteShadowFragmentShaderNames(
+    String name, {
+    required String cubeName,
+  }) {
+    _siteShaders = _SiteShadowFragmentShaders(name, cubeName);
   }
 
   _LeanFragmentShaders? _leanShaders;
@@ -596,6 +613,11 @@ abstract class Material {
       return cube
           ? (noShadow ? lean.noShadowCube! : lean.cube!)
           : (noShadow ? lean.noShadow! : lean.base!);
+    }
+    final site = _siteShaders;
+    if (!noShadow && site != null && lighting.siteShadow) {
+      final shader = cube ? site.cube : site.base;
+      if (shader != null) return shader;
     }
     if (cube) {
       return noShadow
@@ -946,4 +968,19 @@ class _LeanFragmentShaders {
   /// base bundle has loaded.
   late final bool available =
       base != null && cube != null && noShadow != null && noShadowCube != null;
+}
+
+// The site-shadow twins of a material's full and cube entries (WR-77),
+// resolved on first use; null when the bundle lacks them.
+class _SiteShadowFragmentShaders {
+  _SiteShadowFragmentShaders(this._name, this._cubeName);
+
+  final String _name;
+  final String _cubeName;
+
+  gpu.Shader? _base;
+  gpu.Shader? _cube;
+
+  gpu.Shader? get base => _base ??= baseShaderLibrary[_name];
+  gpu.Shader? get cube => _cube ??= baseShaderLibrary[_cubeName];
 }

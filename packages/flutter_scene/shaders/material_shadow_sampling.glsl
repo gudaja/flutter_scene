@@ -7,7 +7,62 @@
 // `punctual_lights`, and `punctual_index` samplers from
 // material_engine_lighting.glsl.
 
-#ifndef FLUTTER_SCENE_SKIP_SHADOWS
+#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && defined(FLUTTER_SCENE_SITE_SHADOW)
+// WR-77 site shadow map (DirectionalLight.shadowSiteBounds): the atlas's first
+// tile is one fixed orthographic map over the whole site, so the lookup is one
+// matrix, a constant depth bias, and a 1- or 4-texel compare (approach from
+// Abyssal Garden's shUV/shadow1/shadow4, MIT, Noniv). The caster pass already
+// added the slope-scaled bias, so there is no normal-offset bias here; there
+// is no cascade selection and no distance fade either. Outside the tile reads
+// as lit. Alpha-masked materials (grass cards, leaves), materials asking for a
+// cheap receiver (casts_shadow > 1.5) and fragments beyond
+// kSiteShadowNearDepth take a single texel; the rest a 2x2 bilinear compare.
+const highp float kSiteShadowNearDepth = 25.0;
+
+float SampleShadow(highp vec3 world_pos, vec3 n) {
+  highp vec3 proj =
+      (frag_info.light_space_matrix[0] * vec4(world_pos, 1.0)).xyz;
+  highp vec2 uv = proj.xy * 0.5 + 0.5;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || proj.z > 1.0) {
+    return 1.0;
+  }
+  highp float receiver_depth =
+      proj.z - frag_info.shadow_bias / (7.0 * frag_info.cascade_box_sizes[0]);
+  // The site twin is drawn only with no spot or point tiles, so the atlas
+  // is the site tile alone.
+  const highp float inv_count = 1.0;
+  highp float texel = frag_info.shadow_texel_size;
+  if (frag_info.casts_shadow > 1.5 || frag_info.alpha_mode == 1.0 ||
+      GetFragmentViewDepth() > kSiteShadowNearDepth) {
+    highp float d =
+        textureLod(shadow_map, vec2(uv.x * inv_count, 1.0 - uv.y), 0.0).r;
+    return receiver_depth <= d ? 1.0 : 0.0;
+  }
+  // 2x2 bilinear PCF: four texels, weights from the fractional position in
+  // the tile (stored top-down, so V flips).
+  highp vec2 tile_tex = vec2(uv.x, 1.0 - uv.y) / texel - vec2(0.5);
+  highp vec2 base = floor(tile_tex);
+  highp vec2 f = tile_tex - base;
+  highp vec2 c00 = (base + vec2(0.5)) * texel;
+  highp vec2 a00 = vec2(c00.x * inv_count, c00.y);
+  highp vec2 step_uv = vec2(texel * inv_count, texel);
+  float s00 = receiver_depth <= textureLod(shadow_map, a00, 0.0).r ? 1.0 : 0.0;
+  float s10 = receiver_depth <=
+                      textureLod(shadow_map, a00 + vec2(step_uv.x, 0.0), 0.0).r
+                  ? 1.0
+                  : 0.0;
+  float s01 = receiver_depth <=
+                      textureLod(shadow_map, a00 + vec2(0.0, step_uv.y), 0.0).r
+                  ? 1.0
+                  : 0.0;
+  float s11 = receiver_depth <= textureLod(shadow_map, a00 + step_uv, 0.0).r
+                  ? 1.0
+                  : 0.0;
+  return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+}
+#endif
+
+#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && !defined(FLUTTER_SCENE_SITE_SHADOW)
 // One rotated Poisson-disk PCF tap into a cascade's atlas tile.
 // Samples the caster depth for the soft-shadow blocker search, with the
 // same tile mapping as ShadowTap and no comparison.
@@ -414,7 +469,7 @@ highp vec2 PunctualLightSlice() {
 }
 #endif  // punctual fetch helpers
 
-#ifndef FLUTTER_SCENE_SKIP_SHADOWS
+#if !defined(FLUTTER_SCENE_SKIP_SHADOWS) && !defined(FLUTTER_SCENE_SITE_SHADOW)
 // One shadow comparison tap for a spot: places the in-tile `uv` in the spot's
 // atlas tile (`tile` of `total`, stored top-down so V is flipped) and returns 1
 // lit / 0 shadowed. `uv` is clamped into the tile so the kernel never reads a

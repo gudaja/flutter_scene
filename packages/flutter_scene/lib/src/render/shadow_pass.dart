@@ -51,6 +51,10 @@ class SpotShadowInfo {
   final int tileResolution;
 }
 
+/// Forces a site shadow map (WR-77) through the per-frame atlas composite
+/// instead of publishing its cached tile, so parity tests can render both.
+bool debugDisableSiteShadowTilePublish = false;
+
 /// Diagnostic (WR-74): how the lit shaders sample the directional shadow.
 /// 0 = normal; 1 = skip the lookup (shadow variant still bound, reads lit);
 /// 2 = the five probe taps only (no penumbra kernel); 3 = one center tap.
@@ -122,7 +126,11 @@ class ShadowPass extends RenderGraphPass {
     ByteData? shadowUniform,
     ShadowCachePlan? cachePlan,
     SharedShadowAtlas? shared,
+    bool siteShadow = false,
+    double siteMinCasterSize = 0.0,
   }) : assert(shared == null || cascades.isEmpty),
+       _siteShadow = siteShadow,
+       _siteMinCasterSize = siteShadow ? siteMinCasterSize : 0.0,
        _renderScene = renderScene,
        _cascades = cascades,
        _cascadeReceiverPlanes = cascadeReceiverPlanes,
@@ -138,6 +146,11 @@ class ShadowPass extends RenderGraphPass {
 
   final RenderScene _renderScene;
   final List<ShadowCascade> _cascades;
+
+  // WR-77: the cascade is a site shadow map, whose casters write a
+  // slope-biased depth (spot and point tiles keep the plain depth).
+  final bool _siteShadow;
+  final double _siteMinCasterSize;
 
   // Per-cascade receiver culling planes (see shadowReceiverCullingPlanes).
   // Empty, or shorter than the cascades, for no receiver culling. Cached
@@ -214,6 +227,24 @@ class ShadowPass extends RenderGraphPass {
 
     final spotCount = _spotShadows?.matrices.length ?? 0;
     final pointCount = _pointShadows?.casters.length ?? 0;
+    // WR-77: a site shadow map with no dynamic caster, spot, or point tile is
+    // exactly its one cached tile, so that tile is published as the atlas:
+    // no per-frame clear or tile copy (it re-renders only when the sun turns
+    // or the static casters change).
+    if (_siteShadow &&
+        plan != null &&
+        _cascades.length == 1 &&
+        spotCount == 0 &&
+        pointCount == 0 &&
+        !debugDisableSiteShadowTilePublish &&
+        !_hasDynamicCascadeCasters()) {
+      context.blackboard.set(kShadowMapBlackboardKey, plan.entries[0].tile!);
+      final shadowUniform = _shadowUniform;
+      if (shadowUniform != null) {
+        context.blackboard.set(kShadowUniformBlackboardKey, shadowUniform);
+      }
+      return;
+    }
     final totalTiles =
         _cascades.length + spotCount + pointCount * kPointShadowTilesPerLight;
     final atlasWidth = _tileResolution * totalTiles;
@@ -261,6 +292,7 @@ class ShadowPass extends RenderGraphPass {
       ShadowCasterFilter filter = ShadowCasterFilter.all,
       int casterChannelMask = 0xFF,
       List<Plane> receiverPlanes = const [],
+      bool siteBias = false,
     }) {
       renderPass.setViewport(
         gpu.Viewport(
@@ -279,6 +311,8 @@ class ShadowPass extends RenderGraphPass {
         filter: filter,
         casterChannelMask: casterChannelMask,
         receiverPlanes: receiverPlanes,
+        siteBias: siteBias,
+        minCasterSize: siteBias ? _siteMinCasterSize : 0.0,
       );
       _renderScene.cull(
         encoder.frustum,
@@ -315,6 +349,8 @@ class ShadowPass extends RenderGraphPass {
           filter: ShadowCasterFilter.dynamicOnly,
           casterChannelMask: _casterChannelMask,
           receiverPlanes: _receiverPlanesFor(c),
+          siteBias: _siteShadow,
+          minCasterSize: _siteMinCasterSize,
         );
         for (final item in _renderScene.items) {
           encoder.submit(item);
@@ -327,6 +363,7 @@ class ShadowPass extends RenderGraphPass {
           _casterFaces,
           casterChannelMask: _casterChannelMask,
           receiverPlanes: _receiverPlanesFor(c),
+          siteBias: _siteShadow,
         );
       }
     }
@@ -446,6 +483,8 @@ class ShadowPass extends RenderGraphPass {
         _casterFaces,
         filter: ShadowCasterFilter.staticOnly,
         casterChannelMask: _casterChannelMask,
+        siteBias: _siteShadow,
+        minCasterSize: _siteMinCasterSize,
       );
       final deferred = deferredPipelineBuilds;
       _renderScene.cull(encoder.frustum, encoder.submitCulled);
@@ -455,6 +494,21 @@ class ShadowPass extends RenderGraphPass {
       // the next frame rather than reuse it.
       if (deferredPipelineBuilds > deferred) entry.hasContent = false;
     }
+  }
+
+  /// Whether any item would draw as a dynamic caster into a cascade tile
+  /// (the view-independent test; culling only removes more).
+  bool _hasDynamicCascadeCasters() {
+    for (final item in _renderScene.items) {
+      if (shadowCasterAccepted(
+        item,
+        ShadowCasterFilter.dynamicOnly,
+        _casterChannelMask,
+      )) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Replays cascade [tile]'s cached static content into its atlas slot,

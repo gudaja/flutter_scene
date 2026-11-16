@@ -65,8 +65,14 @@ class ShadowEncoder {
     ShadowCasterFilter filter = ShadowCasterFilter.all,
     int casterChannelMask = 0xFF,
     this.receiverPlanes = const [],
+    bool siteBias = false,
+    this.minCasterSize = 0.0,
   }) : _filter = filter,
-       _casterChannelMask = casterChannelMask {
+       _casterChannelMask = casterChannelMask,
+       _plainDepthShader = siteBias ? _siteDepthShader : _depthShader,
+       _plainMaskedDepthShader = siteBias
+           ? _siteMaskedDepthShader
+           : _maskedDepthShader {
     frustum = Frustum.matrix(_lightSpaceMatrix);
     _renderPass.setDepthWriteEnable(true);
     _renderPass.setColorBlendEnable(false);
@@ -114,6 +120,21 @@ class ShadowEncoder {
   static final gpu.Shader _maskedDepthShader =
       baseShaderLibrary['DepthOnlyMaskedFragment']!;
 
+  // WR-77: a site shadow map's casters write a slope-biased depth (see
+  // flutter_scene_shadow_site_depth.frag); null when the bundle lacks them,
+  // which falls back to the plain depth.
+  static final gpu.Shader _siteDepthShader =
+      baseShaderLibrary['ShadowSiteDepthFragment'] ?? _depthShader;
+  static final gpu.Shader _siteMaskedDepthShader =
+      baseShaderLibrary['ShadowSiteDepthMaskedFragment'] ?? _maskedDepthShader;
+
+  /// Casters whose world bounds are smaller than this on every axis are
+  /// skipped (WR-77 site map, [DirectionalLight.shadowSiteMinCasterSize]).
+  final double minCasterSize;
+
+  final gpu.Shader _plainDepthShader;
+  final gpu.Shader _plainMaskedDepthShader;
+
   /// The cull mode the light's caster-face setting maps to, applied to
   /// non-masked casters.
   late final gpu.CullMode _casterCullMode;
@@ -155,6 +176,20 @@ class ShadowEncoder {
     if (!item.material.isOpaque()) return;
     // UI composited over the scene casts no shadow into it.
     if (item.material.displayReferred) return;
+    if (minCasterSize > 0.0) {
+      final bounds = item.cullBounds;
+      if (bounds != null) {
+        _cullScratchAabb
+          ..copyFrom(bounds)
+          ..transform(item.worldTransform);
+        final size = _cullScratchAabb.max - _cullScratchAabb.min;
+        if (size.x < minCasterSize &&
+            size.y < minCasterSize &&
+            size.z < minCasterSize) {
+          return;
+        }
+      }
+    }
     if (!alreadyCulled && item.frustumCulled) {
       final bounds = item.cullBounds;
       if (bounds != null) {
@@ -253,7 +288,7 @@ class ShadowEncoder {
         : item.material.depthSurfaceShader(DepthSurfaceKind.shadow);
     final masked = surfaceShader != null || item.material.depthAlphaMasked;
     final fragmentShader =
-        surfaceShader ?? (masked ? _maskedDepthShader : _depthShader);
+        surfaceShader ?? (masked ? _plainMaskedDepthShader : _plainDepthShader);
     // A double-sided caster records every face regardless of the light's
     // caster-face mode or the material's culling, which is what closes the
     // light leak through single-sided geometry. A double-sided material casts

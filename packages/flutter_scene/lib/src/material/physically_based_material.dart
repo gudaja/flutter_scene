@@ -1148,6 +1148,12 @@ class PhysicallyBasedMaterial extends Material {
       noShadowName: '${prefix}LeanNoShadowFragment',
       noShadowCubeName: '${prefix}LeanNoShadowCubeFragment',
     );
+    if (!lightmapped) {
+      setSiteShadowFragmentShaderNames(
+        'StandardSiteFragment',
+        cubeName: 'StandardSiteCubeFragment',
+      );
+    }
   }
 
   @override

@@ -268,6 +268,20 @@ class PunctualLightBuffer {
   final _TextureRing _paramsRing = _TextureRing();
   final _TextureRing _indexRing = _TextureRing();
 
+  // The light-to-item assignment is view-independent, so it is remembered
+  // across frames and recomputed only when a light or an item changed
+  // (WR-81c).
+  final LightAssignmentCache _assignment = LightAssignmentCache();
+
+  /// How many builds actually recomputed the light-to-item assignment.
+  @internal
+  int get debugLightAssignmentRecomputes => _assignment.recomputeCount;
+
+  // The index data uploaded for [_indexDataFor]; reused while the
+  // assignment result is the same object.
+  LightCullResult? _indexDataResult;
+  Float32List? _indexData;
+
   bool _warnedOverflow = false;
 
   /// How many items (per-object mode) or froxels (clustered mode) dropped
@@ -389,7 +403,7 @@ class PunctualLightBuffer {
       _lastParams = Float32List.fromList(packed.params);
     }
 
-    final cull = assignLightsToItems(
+    final cull = _assignment.assign(
       items: items,
       bvh: bvh,
       lights: packed.cullables,
@@ -439,9 +453,14 @@ class PunctualLightBuffer {
     final indexWidth = math.min(indexLength, _indexTexMaxWidth);
     final indexHeight = (indexLength + indexWidth - 1) ~/ indexWidth;
     // RGBA32F; the light index rides in .r, the rest is unread padding.
-    final indexData = Float32List(indexWidth * indexHeight * 4);
-    for (var i = 0; i < indexLength; i++) {
-      indexData[i * 4] = cull.indices[i].toDouble();
+    var indexData = _indexData;
+    if (!identical(cull, _indexDataResult) || indexData == null) {
+      indexData = Float32List(indexWidth * indexHeight * 4);
+      for (var i = 0; i < indexLength; i++) {
+        indexData[i * 4] = cull.indices[i].toDouble();
+      }
+      _indexData = indexData;
+      _indexDataResult = cull;
     }
     final indexTexture = _indexRing.upload(indexWidth, indexHeight, indexData);
 
@@ -497,6 +516,9 @@ class PunctualLightBuffer {
 
   /// Drops every texture the buffer keeps across frames.
   void releaseTextures() {
+    _assignment.clear();
+    _indexDataResult = null;
+    _indexData = null;
     _paramsRing.clear();
     _indexRing.clear();
     _froxelRing.clear();

@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/render/bvh.dart';
@@ -134,10 +136,7 @@ LightCullResult assignLightsToItems({
     final scratch = item.lightScratch;
     var count = scratch.length;
     if (count > maxPerItem) {
-      scratch.sort(
-        (a, b) =>
-            _compareLightsForItem(item, lightsByIndex[a]!, lightsByIndex[b]!),
-      );
+      _keepNearest(item, scratch, lightsByIndex, maxPerItem);
       count = maxPerItem;
       overflowedItems++;
     }
@@ -217,35 +216,252 @@ LightCullResult _assignInfiniteLights(
   return LightCullResult(flat, overflowedItems);
 }
 
-int _compareLightsForItem(RenderItem item, CullableLight a, CullableLight b) {
-  final bounds = item.worldBounds;
-  final aDistance = _distanceToItemSquared(item, bounds, a.worldPosition);
-  final bDistance = _distanceToItemSquared(item, bounds, b.worldPosition);
-  final distanceOrder = aDistance.compareTo(bDistance);
-  if (distanceOrder != 0) return distanceOrder;
+// Reused key buffers for [_keepNearest] (one slot per kept light).
+Float64List _nearestDistance = Float64List(0);
+Float64List _nearestCenter = Float64List(0);
+Int32List _nearestIndex = Int32List(0);
 
-  // Lights inside or touching a large item's bounds all have zero distance.
-  // Prefer the one nearest its center before falling back to row order.
-  if (bounds != null && a.worldPosition != null && b.worldPosition != null) {
-    final centerX = (bounds.min.x + bounds.max.x) * 0.5;
-    final centerY = (bounds.min.y + bounds.max.y) * 0.5;
-    final centerZ = (bounds.min.z + bounds.max.z) * 0.5;
-    final aCenterDistance = _distanceSquared(
-      a.worldPosition!,
-      centerX,
-      centerY,
-      centerZ,
-    );
-    final bCenterDistance = _distanceSquared(
-      b.worldPosition!,
-      centerX,
-      centerY,
-      centerZ,
-    );
-    final centerOrder = aCenterDistance.compareTo(bCenterDistance);
-    if (centerOrder != 0) return centerOrder;
+// Moves the [keep] lights of [scratch] that reach [item] most strongly to the
+// front of [scratch], nearest first. The order is lexicographic on (distance
+// to the item's bounds, distance to the bounds' center, row index):
+// directional lights first (they have no position), then the nearest local
+// lights; lights inside or touching a large item's bounds all have zero
+// distance, so the one nearest its center wins before row order decides.
+// Row indices are unique, so this is a strict total order and the kept
+// prefix equals that of fully sorting [scratch] with the same order, at
+// O(n * keep) worst case instead of O(n log n) comparator calls that each
+// recompute both distances (WR-81c).
+void _keepNearest(
+  RenderItem item,
+  List<int> scratch,
+  Map<int, CullableLight> lightsByIndex,
+  int keep,
+) {
+  if (_nearestIndex.length < keep) {
+    _nearestDistance = Float64List(keep);
+    _nearestCenter = Float64List(keep);
+    _nearestIndex = Int32List(keep);
   }
-  return a.index.compareTo(b.index);
+  final keyD = _nearestDistance;
+  final keyC = _nearestCenter;
+  final keyI = _nearestIndex;
+  final bounds = item.worldBounds;
+  var centerX = 0.0, centerY = 0.0, centerZ = 0.0;
+  if (bounds != null) {
+    centerX = (bounds.min.x + bounds.max.x) * 0.5;
+    centerY = (bounds.min.y + bounds.max.y) * 0.5;
+    centerZ = (bounds.min.z + bounds.max.z) * 0.5;
+  }
+  var held = 0;
+  for (final index in scratch) {
+    final position = lightsByIndex[index]!.worldPosition;
+    final d = _distanceToItemSquared(item, bounds, position);
+    // The center term only breaks distance ties between positioned lights on
+    // a bounded item; equal distances otherwise mean two directionals (both
+    // -infinity), whose center terms are both zero here.
+    final c = bounds != null && position != null
+        ? _distanceSquared(position, centerX, centerY, centerZ)
+        : 0.0;
+    var slot = held;
+    if (held == keep) {
+      if (_compareKeys(
+            d,
+            c,
+            index,
+            keyD[keep - 1],
+            keyC[keep - 1],
+            keyI[keep - 1],
+          ) >=
+          0) {
+        continue;
+      }
+      slot = keep - 1;
+    } else {
+      held++;
+    }
+    while (slot > 0 &&
+        _compareKeys(
+              d,
+              c,
+              index,
+              keyD[slot - 1],
+              keyC[slot - 1],
+              keyI[slot - 1],
+            ) <
+            0) {
+      keyD[slot] = keyD[slot - 1];
+      keyC[slot] = keyC[slot - 1];
+      keyI[slot] = keyI[slot - 1];
+      slot--;
+    }
+    keyD[slot] = d;
+    keyC[slot] = c;
+    keyI[slot] = index;
+  }
+  for (var i = 0; i < held; i++) {
+    scratch[i] = keyI[i];
+  }
+}
+
+int _compareKeys(double d1, double c1, int i1, double d2, double c2, int i2) {
+  final byDistance = d1.compareTo(d2);
+  if (byDistance != 0) return byDistance;
+  final byCenter = c1.compareTo(c2);
+  if (byCenter != 0) return byCenter;
+  return i1.compareTo(i2);
+}
+
+/// Remembers the last [assignLightsToItems] result and hands it back while
+/// its inputs are unchanged, so a frame whose lights and items did not change
+/// (a moving camera included: the assignment is view-independent) costs one
+/// comparison pass instead of a BVH scatter plus a nearest-light selection for
+/// every overflowing item (WR-81c: ~500 lamps in a hotel spent 41 % of the
+/// UI isolate's samples re-sorting identical lists every frame).
+///
+/// The inputs compared are everything the assignment reads: the [Bvh]
+/// (identity and [Bvh.revision]), the item list (identity and order) with
+/// each item's [RenderItem.worldBounds] (or, unbounded, its transform's
+/// translation), [RenderItem.frustumCulled] and
+/// [RenderItem.lightChannelMask], and every light's row index, influence
+/// bounds, position, and channel mask, plus `maxPerItem`. A hit leaves the
+/// items' [RenderItem.lightListOffset]/[RenderItem.lightListCount] as the
+/// last assignment wrote them; only the culler writes those fields.
+class LightAssignmentCache {
+  /// How many times [assign] actually ran the assignment.
+  int get recomputeCount => _recomputeCount;
+  int _recomputeCount = 0;
+
+  LightCullResult? _result;
+  Bvh? _bvh;
+  int _bvhRevision = -1;
+  int _maxPerItem = -1;
+  List<RenderItem> _items = const [];
+  Float64List _itemKeys = Float64List(0);
+  Float64List _lightKeys = Float64List(0);
+
+  static const int _floatsPerItem = 8;
+  static const int _floatsPerLight = 13;
+
+  /// [assignLightsToItems], skipped when nothing it reads changed since the
+  /// previous call.
+  LightCullResult assign({
+    required List<RenderItem> items,
+    required Bvh bvh,
+    required List<CullableLight> lights,
+    required int maxPerItem,
+  }) {
+    final cached = _result;
+    if (cached != null &&
+        identical(bvh, _bvh) &&
+        bvh.revision == _bvhRevision &&
+        maxPerItem == _maxPerItem &&
+        _sameLights(lights) &&
+        _sameItems(items)) {
+      return cached;
+    }
+    _recomputeCount++;
+    final result = assignLightsToItems(
+      items: items,
+      bvh: bvh,
+      lights: lights,
+      maxPerItem: maxPerItem,
+    );
+    _result = result;
+    _bvh = bvh;
+    _bvhRevision = bvh.revision;
+    _maxPerItem = maxPerItem;
+    _items = List<RenderItem>.of(items, growable: false);
+    _itemKeys = Float64List(items.length * _floatsPerItem);
+    for (var i = 0; i < items.length; i++) {
+      _writeItemKey(items[i], _itemKeys, i * _floatsPerItem);
+    }
+    _lightKeys = Float64List(lights.length * _floatsPerLight);
+    for (var i = 0; i < lights.length; i++) {
+      _writeLightKey(lights[i], _lightKeys, i * _floatsPerLight);
+    }
+    return result;
+  }
+
+  /// Forgets the remembered assignment, so the next [assign] recomputes.
+  void clear() {
+    _result = null;
+    _bvh = null;
+    _items = const [];
+  }
+
+  // Scratch for comparing one key without allocating.
+  final Float64List _probe = Float64List(_floatsPerLight);
+
+  bool _sameItems(List<RenderItem> items) {
+    if (items.length != _items.length) return false;
+    final keys = _itemKeys;
+    final probe = _probe;
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      if (!identical(item, _items[i])) return false;
+      _writeItemKey(item, probe, 0);
+      final base = i * _floatsPerItem;
+      for (var k = 0; k < _floatsPerItem; k++) {
+        // NaN never equals itself, so a NaN bound always recomputes.
+        if (probe[k] != keys[base + k]) return false;
+      }
+    }
+    return true;
+  }
+
+  bool _sameLights(List<CullableLight> lights) {
+    if (lights.length * _floatsPerLight != _lightKeys.length) return false;
+    final keys = _lightKeys;
+    final probe = _probe;
+    for (var i = 0; i < lights.length; i++) {
+      _writeLightKey(lights[i], probe, 0);
+      final base = i * _floatsPerLight;
+      for (var k = 0; k < _floatsPerLight; k++) {
+        if (probe[k] != keys[base + k]) return false;
+      }
+    }
+    return true;
+  }
+
+  static void _writeItemKey(RenderItem item, Float64List out, int o) {
+    final bounds = item.worldBounds;
+    out[o] = (bounds != null ? 1.0 : 0.0) + (item.frustumCulled ? 2.0 : 0.0);
+    out[o + 1] = item.lightChannelMask.toDouble();
+    if (bounds != null) {
+      out[o + 2] = bounds.min.x;
+      out[o + 3] = bounds.min.y;
+      out[o + 4] = bounds.min.z;
+      out[o + 5] = bounds.max.x;
+      out[o + 6] = bounds.max.y;
+      out[o + 7] = bounds.max.z;
+    } else {
+      final t = item.worldTransform.storage;
+      out[o + 2] = t[12];
+      out[o + 3] = t[13];
+      out[o + 4] = t[14];
+      out[o + 5] = 0.0;
+      out[o + 6] = 0.0;
+      out[o + 7] = 0.0;
+    }
+  }
+
+  static void _writeLightKey(CullableLight light, Float64List out, int o) {
+    final bounds = light.bounds;
+    final position = light.worldPosition;
+    out[o] = light.index.toDouble();
+    out[o + 1] = light.channelMask.toDouble();
+    out[o + 2] = (bounds != null ? 1.0 : 0.0) + (position != null ? 2.0 : 0.0);
+    out[o + 3] = bounds?.min.x ?? 0.0;
+    out[o + 4] = bounds?.min.y ?? 0.0;
+    out[o + 5] = bounds?.min.z ?? 0.0;
+    out[o + 6] = bounds?.max.x ?? 0.0;
+    out[o + 7] = bounds?.max.y ?? 0.0;
+    out[o + 8] = bounds?.max.z ?? 0.0;
+    out[o + 9] = position?.x ?? 0.0;
+    out[o + 10] = position?.y ?? 0.0;
+    out[o + 11] = position?.z ?? 0.0;
+    out[o + 12] = 0.0;
+  }
 }
 
 double _distanceToItemSquared(

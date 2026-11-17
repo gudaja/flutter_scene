@@ -148,6 +148,11 @@ class Bvh {
   /// Items this tree was built over.
   int get itemCount => _items.length;
 
+  /// Bumped by every [refit], so a consumer caching query results against
+  /// this tree can tell its leaf bounds may have moved.
+  int get revision => _revision;
+  int _revision = 0;
+
   // Traversal stack, sized for a balanced tree far deeper than any
   // realistic item count. Queries are single-threaded and never nest (a
   // visit callback must not query the same Bvh).
@@ -376,6 +381,7 @@ class Bvh {
   /// needs a rebuild. Cheaper than a rebuild (O(n), no sort), but tree
   /// quality degrades as items drift from their build-time grouping.
   void refit() {
+    _revision++;
     final bounds = _bounds;
     final children = _children;
     // Children precede parents, so one forward pass refreshes everything.

@@ -482,6 +482,39 @@ void main() {
     }
   });
 
+  test('T-WR81c-5 · a refit that lands a frame after the bounds changed '
+      'still recomputes', () {
+    final r = math.Random(5);
+    final s = _randomScene(r, lightCount: 100, channels: false);
+    final cache = LightAssignmentCache();
+    cache.assign(items: s.items, bvh: s.bvh, lights: s.lights, maxPerItem: 16);
+    // Move every bounded item far away without refitting: the stale tree
+    // still places them where they were.
+    for (final item in s.items) {
+      final b = item.worldBounds;
+      if (b == null) continue;
+      final d = Vector3(500, 0, 500);
+      b.copyFrom(Aabb3.minMax(b.min + d, b.max + d));
+    }
+    var result = cache.assign(
+      items: s.items,
+      bvh: s.bvh,
+      lights: s.lights,
+      maxPerItem: 16,
+    );
+    _expectSame(_capture(s.items, result), _reference(s, 16), 'stale tree');
+    // The refit arrives next frame; the items' bounds did not change again.
+    s.bvh.refit();
+    result = cache.assign(
+      items: s.items,
+      bvh: s.bvh,
+      lights: s.lights,
+      maxPerItem: 16,
+    );
+    _expectSame(_capture(s.items, result), _reference(s, 16), 'refit');
+    expect(cache.recomputeCount, 3);
+  });
+
   test('T-WR81c-4 · a cache shared by two light sets (environment capture '
       'between frames) never hands back the other set', () {
     final r = math.Random(4);

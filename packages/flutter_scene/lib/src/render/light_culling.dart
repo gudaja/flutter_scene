@@ -319,11 +319,14 @@ int _compareKeys(double d1, double c1, int i1, double d2, double c2, int i2) {
 /// UI isolate's samples re-sorting identical lists every frame).
 ///
 /// The inputs compared are everything the assignment reads: the [Bvh]
-/// (identity and [Bvh.revision]), the item list (identity and order) with
-/// each item's [RenderItem.worldBounds] (or, unbounded, its transform's
-/// translation), [RenderItem.frustumCulled] and
+/// (identity and [Bvh.revision] — its leaf bounds decide which items a
+/// ranged light reaches, and may lag the items' bounds until refit), the
+/// item list (identity and order) with each item's [RenderItem.worldBounds]
+/// (or, unbounded, its transform's translation) and
 /// [RenderItem.lightChannelMask], and every light's row index, influence
-/// bounds, position, and channel mask, plus `maxPerItem`. A hit leaves the
+/// bounds, position, and channel mask, plus `maxPerItem`. BVH membership
+/// ([RenderItem.frustumCulled]) is read only through the tree, which is
+/// rebuilt (a new object) when it changes. A hit leaves the
 /// items' [RenderItem.lightListOffset]/[RenderItem.lightListCount] as the
 /// last assignment wrote them; only the culler writes those fields.
 class LightAssignmentCache {
@@ -425,7 +428,7 @@ class LightAssignmentCache {
 
   static void _writeItemKey(RenderItem item, Float64List out, int o) {
     final bounds = item.worldBounds;
-    out[o] = (bounds != null ? 1.0 : 0.0) + (item.frustumCulled ? 2.0 : 0.0);
+    out[o] = bounds != null ? 1.0 : 0.0;
     out[o + 1] = item.lightChannelMask.toDouble();
     if (bounds != null) {
       out[o + 2] = bounds.min.x;

@@ -73,18 +73,21 @@ class Surface {
     int viewIndex = 0,
     gpu.PixelFormat? format,
     Size? extent,
-  ]) => _view(viewIndex).nextSwapchainColor(size, format, extent);
+    Size? area,
+  ]) => _view(viewIndex).nextSwapchainColor(size, format, extent, area);
 
   /// The size of view [viewIndex]'s kept targets that a frame of [size] can
   /// render into the top-left sub-rectangle of (WR-88c), or null when no
-  /// larger size is kept. A render scale that drops while the camera moves
-  /// then reuses the full-resolution targets instead of a second set.
+  /// larger size is kept for the same logical [area]. A render scale that
+  /// drops while the camera moves then reuses the full-resolution targets
+  /// instead of a second set; a view that shrank gets targets of its own.
   @internal
   Size? subrectTargetFor(
-    Size size, [
+    Size size,
+    Size area, [
     int viewIndex = 0,
     gpu.PixelFormat? format,
-  ]) => _view(viewIndex).subrectTargetFor(size, format);
+  ]) => _view(viewIndex).subrectTargetFor(size, area, format);
 
   /// The rendered size of the texture [lastSwapchainColorTexture] returns:
   /// its full size, or the sub-rectangle a frame rendered into.
@@ -204,6 +207,10 @@ class _SizedTargets {
   /// The view's frame count when this size last rendered.
   int lastUsed = 0;
 
+  /// The logical area the view drew these targets into when they were last
+  /// used, or null when the caller did not say (WR-88c).
+  Size? area;
+
   /// Releases every texture, which must not be used afterwards.
   void release() {
     pool.clear();
@@ -269,15 +276,16 @@ class _ViewSurface {
     return bytes;
   }
 
-  Size? subrectTargetFor(Size size, gpu.PixelFormat? format) {
+  Size? subrectTargetFor(Size size, Size area, gpu.PixelFormat? format) {
     _SizedTargets? best;
     for (final sized in _sizes) {
       if (sized.format != format || sized.size == size) continue;
+      if (sized.area != area) continue;
       if (sized.size.width < size.width || sized.size.height < size.height) {
         continue;
       }
-      final area = sized.size.width * sized.size.height;
-      if (best == null || area < best.size.width * best.size.height) {
+      final pixels = sized.size.width * sized.size.height;
+      if (best == null || pixels < best.size.width * best.size.height) {
         best = sized;
       }
     }
@@ -288,6 +296,7 @@ class _ViewSurface {
     Size size, [
     gpu.PixelFormat? format,
     Size? extent,
+    Size? area,
   ]) {
     _frame++;
     var sized = _sizes.isEmpty ? null : _sizes.last;
@@ -319,6 +328,7 @@ class _ViewSurface {
       }
     }
     sized.lastUsed = _frame;
+    sized.area = area;
     _sizes.removeWhere((s) {
       if (_frame - s.lastUsed <= _idleFrames) return false;
       s.release();

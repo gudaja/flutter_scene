@@ -2984,11 +2984,12 @@ base class Scene implements SceneGraph {
           viewIndex,
           null,
           extent,
+          drawArea.size,
         );
         return (swapchainColor, surface.transientTexturePool(viewIndex));
       },
       subrectTarget: capturer == null
-          ? surface.subrectTargetFor(pixelSize, viewIndex)
+          ? surface.subrectTargetFor(pixelSize, drawArea.size, viewIndex)
           : null,
       pixelSize: pixelSize,
       viewportSize: drawArea.size,

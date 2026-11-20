@@ -52,7 +52,11 @@ Scene _scene({AntiAliasingMode aa = AntiAliasingMode.smaa}) {
 
 /// Renders [scene] at [scale] into a [_w] x [_h] region, waits for the GPU
 /// work, and returns the composited canvas pixels.
-Future<Uint8List> _frame(Scene scene, double scale) async {
+Future<Uint8List> _frame(
+  Scene scene,
+  double scale, {
+  double width = _w * 1.0,
+}) async {
   scene.renderScale = scale;
   final recorder = ui.PictureRecorder();
   scene.renderViews(
@@ -65,7 +69,7 @@ Future<Uint8List> _frame(Scene scene, double scale) async {
       ),
     ],
     ui.Canvas(recorder),
-    region: const ui.Rect.fromLTWH(0, 0, _w * 1.0, _h * 1.0),
+    region: ui.Rect.fromLTWH(0, 0, width, _h * 1.0),
     pixelRatio: 1.0,
   );
   final image = await recorder.endRecording().toImage(_w, _h);
@@ -208,6 +212,23 @@ void main() {
     await _settled(scene, 0.5);
     expect(_pooledWidths(scene), {_w});
     restOnly.dispose();
+    scene.dispose();
+  });
+
+  test('T-WR88c-7 · a view that shrinks at the same scale gets targets of '
+      'its own, not a sub-rectangle of the old ones', () async {
+    final scene = _scene();
+    for (var i = 0; i < 4; i++) {
+      await _frame(scene, 1.0);
+    }
+    for (var i = 0; i < 4; i++) {
+      await _frame(scene, 1.0, width: _w / 2);
+    }
+    expect(
+      scene.surface.lastSwapchainExtent(),
+      const ui.Size(_w / 2, _h * 1.0),
+    );
+    expect(scene.surface.lastSwapchainColorTexture()!.width, _w ~/ 2);
     scene.dispose();
   });
 

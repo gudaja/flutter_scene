@@ -6,7 +6,8 @@ import 'package:flutter/services.dart';
 import '../asset_helpers.dart';
 import '../gpu/gpu.dart' as gpu;
 import '../render/mip_sampling_probe.dart';
-import 'basisu/basis_ktx2_loader.dart' show gpuTextureFromAnyKtx2Async;
+import 'basisu/basis_ktx2_loader.dart'
+    show currentCompressionSupport, gpuTextureFromAnyKtx2Async;
 import 'encoded_image.dart';
 import 'mip_upload_web.dart' if (dart.library.io) 'mip_upload_native.dart';
 import 'mipmap.dart';
@@ -311,6 +312,14 @@ class Texture2D implements TextureSource {
     await gpuTextureFromAnyKtx2Async(bytes, content: content, maxSize: maxSize),
     sampling.toSamplerOptions(),
   );
+
+  /// The block-compression families the current GPU context samples, by
+  /// name (`astc`, `bc`, `etc2`), most preferred first. A UASTC KTX2 file
+  /// uploads compressed only with `astc`, ETC1S with `bc` or `etc2`; without
+  /// them [fromKtx2Bytes] decodes to rgba8.
+  static List<String> get blockCompressionFamilies => [
+    for (final family in currentCompressionSupport()) family.name,
+  ];
 
   /// Loads the standard KTX2 asset at [assetPath] and uploads it as
   /// [fromKtx2Bytes] does.

@@ -206,10 +206,13 @@ class SmaaPass extends RenderGraphPass {
     final input = context.blackboard.require<gpu.Texture>(
       kDisplayColorBlackboardKey,
     );
-    final width = _dimensions.width.toInt();
-    final height = _dimensions.height.toInt();
+    // WR-88c: a sub-rectangle frame keeps the targets' size (texel metrics
+    // and allocation) and clamps v_uv to the rendered part.
+    final extent = context.extent;
+    final width = extent?.targetWidth ?? _dimensions.width.toInt();
+    final height = extent?.targetHeight ?? _dimensions.height.toInt();
 
-    final info = Float32List(8)
+    final info = Float32List(12)
       ..[0] = width == 0 ? 0.0 : 1.0 / width
       ..[1] = height == 0 ? 0.0 : 1.0 / height
       ..[2] = width.toDouble()
@@ -217,7 +220,9 @@ class SmaaPass extends RenderGraphPass {
       ..[4] = _settings.threshold
       ..[5] = _settings.maxSearchSteps.clamp(1, 112).toDouble()
       ..[6] = _settings.maxDiagonalSearchSteps.clamp(1, 20).toDouble()
-      ..[7] = _settings.cornerRounding.clamp(0.0, 100.0);
+      ..[7] = _settings.cornerRounding.clamp(0.0, 100.0)
+      ..[8] = extent?.uvMaxX ?? 0.0
+      ..[9] = extent?.uvMaxY ?? 0.0;
     final infoView = context.transientsBuffer.emplace(
       ByteData.sublistView(info),
     );
@@ -244,6 +249,7 @@ class SmaaPass extends RenderGraphPass {
         ),
       );
       renderPass.bindPipeline(resolvePipeline(_vertexShader, _edgesShader));
+      extent?.applyScreen(renderPass);
       bindVertexBufferCompat(renderPass, _quadView, 6);
       renderPass.bindTexture(
         _edgesShader.cachedUniformSlot('scene_color'),
@@ -279,6 +285,7 @@ class SmaaPass extends RenderGraphPass {
         ),
       );
       renderPass.bindPipeline(resolvePipeline(_vertexShader, _weightsShader));
+      extent?.applyScreen(renderPass);
       bindVertexBufferCompat(renderPass, _quadView, 6);
       renderPass.bindTexture(
         _weightsShader.cachedUniformSlot('edges_texture'),
@@ -310,6 +317,7 @@ class SmaaPass extends RenderGraphPass {
         gpu.RenderTarget.singleColor(gpu.ColorAttachment(texture: _output)),
       );
       renderPass.bindPipeline(resolvePipeline(_vertexShader, _blendShader));
+      extent?.applyScreen(renderPass);
       bindVertexBufferCompat(renderPass, _quadView, 6);
       renderPass.bindTexture(
         _blendShader.cachedUniformSlot('scene_color'),

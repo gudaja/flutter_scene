@@ -97,6 +97,7 @@ class ResolvePass extends RenderGraphPass {
     );
     final pipeline = resolvePipeline(_vertexShader, _fragmentShader);
     renderPass.bindPipeline(pipeline);
+    context.extent?.applyScreen(renderPass);
     bindVertexBufferCompat(renderPass, _quadView, 6);
 
     // Wall-clock seconds (wrapped to keep float precision) drive the
@@ -116,6 +117,7 @@ class ResolvePass extends RenderGraphPass {
       debugViewActive: _debugViewActive,
       debugViewSplit: _debugViewSplit,
       bloomEnabled: _postProcess.bloom.enabled && !_debugSkipsPost,
+      extent: context.extent,
     );
     renderPass.bindUniform(
       _fragmentShader.cachedUniformSlot('ResolveInfo'),

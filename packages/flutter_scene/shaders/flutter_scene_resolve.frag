@@ -23,8 +23,10 @@ uniform ResolveInfo {
   float temperature;
 
   float tint;
-  float _pad0;
-  float _pad1;
+  // WR-88c: a frame rendered into the top-left sub-rectangle of a larger
+  // target clamps v_uv to its last texel center (0 = fills the target).
+  float uv_max_x;
+  float uv_max_y;
   float _pad2;
 
   // Only the xyz channels are used; w is padding.
@@ -44,8 +46,10 @@ uniform ResolveInfo {
 
   float grain_enabled;
   float grain_intensity;
-  float _pad4;
-  float _pad5;
+  // WR-88c: target size over sub-rectangle size, turning the clamped v_uv
+  // into the view's own 0..1 for the vignette (0 = fills the target).
+  float view_scale_x;
+  float view_scale_y;
 
   float bloom_enabled;
   float bloom_intensity;
@@ -76,6 +80,15 @@ uniform sampler2D exposure_factor;
 uniform sampler2D grading_lut;
 
 in vec2 v_uv;
+
+// v_uv clamped to the rendered sub-rectangle (WR-88c); v_uv itself when the
+// frame fills its target.
+vec2 ExtentUv() {
+  if (resolve_info.uv_max_x > 0.0) {
+    return min(v_uv, vec2(resolve_info.uv_max_x, resolve_info.uv_max_y));
+  }
+  return v_uv;
+}
 
 out vec4 frag_color;
 
@@ -201,7 +214,11 @@ vec3 Display(vec3 color, float exposure, bool grain) {
 
   // Vignette: darken toward the edges of the screen.
   if (resolve_info.vignette_enabled > 0.5) {
-    float dist = length((v_uv - 0.5) * 2.0);
+    vec2 view_uv = ExtentUv();
+    if (resolve_info.view_scale_x > 0.0) {
+      view_uv *= vec2(resolve_info.view_scale_x, resolve_info.view_scale_y);
+    }
+    float dist = length((view_uv - 0.5) * 2.0);
     float falloff = smoothstep(
         resolve_info.vignette_radius,
         resolve_info.vignette_radius + resolve_info.vignette_smoothness,
@@ -230,7 +247,9 @@ vec3 Display(vec3 color, float exposure, bool grain) {
 }
 
 void main() {
-  vec2 uv = resolve_info.flip_y > 0.5 ? vec2(v_uv.x, 1.0 - v_uv.y) : v_uv;
+  vec2 base_uv = ExtentUv();
+  vec2 uv = resolve_info.flip_y > 0.5 ? vec2(base_uv.x, 1.0 - base_uv.y)
+                                      : base_uv;
 
   // A surface debug view wrote display-referred pixels; hand them through so
   // the value on screen is the value the material saw. Left of a split the

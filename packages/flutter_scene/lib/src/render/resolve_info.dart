@@ -1,5 +1,7 @@
-import 'dart:typed_data';
 import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:flutter_scene/src/render/render_graph.dart' show RenderExtent;
 
 import 'package:flutter_scene/src/post_process/post_process.dart';
 import 'package:flutter_scene/src/tone_mapping.dart';
@@ -27,6 +29,7 @@ Float32List packResolveInfo({
   bool debugViewActive = false,
   double debugViewSplit = -1.0,
   bool? bloomEnabled,
+  RenderExtent? extent,
 }) {
   final grading = settings.colorGrading;
   final aberration = settings.chromaticAberration;
@@ -80,6 +83,15 @@ Float32List packResolveInfo({
   // Row 8: film grain, then padding.
   info[32] = grain.enabled ? 1.0 : 0.0;
   info[33] = grain.intensity;
+
+  // WR-88c: the sub-rectangle a frame renders into, in the row 2 and row 8
+  // padding (zero, as before, when the frame fills its target).
+  if (extent != null) {
+    info[9] = extent.uvMaxX;
+    info[10] = extent.uvMaxY;
+    info[34] = extent.targetWidth / extent.width;
+    info[35] = extent.targetHeight / extent.height;
+  }
 
   // Row 9: bloom, then padding.
   info[36] = (bloomEnabled ?? bloom.enabled) ? 1.0 : 0.0;

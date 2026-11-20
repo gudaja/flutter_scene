@@ -218,8 +218,11 @@ class ScenePass extends RenderGraphPass {
 
   @override
   void execute(RenderGraphContext context) {
-    final width = _dimensions.width.toInt();
-    final height = _dimensions.height.toInt();
+    // WR-88c: a sub-rectangle frame keeps the larger targets' size and draws
+    // through a viewport over its own.
+    final extent = context.extent;
+    final width = extent?.targetWidth ?? _dimensions.width.toInt();
+    final height = extent?.targetHeight ?? _dimensions.height.toInt();
     _conflictIds = _renderDepthConflictIds(context);
 
     final capture = _captureOpaqueColor;
@@ -410,6 +413,7 @@ class ScenePass extends RenderGraphPass {
 
     final commandBuffer = gpu.gpuContext.createCommandBuffer();
     final renderPass = commandBuffer.createRenderPass(target);
+    extent?.applyGeometry(renderPass);
 
     // Draw the background first, behind the geometry. It writes no depth, so
     // the opaque phase (depth-tested against the cleared far value) draws

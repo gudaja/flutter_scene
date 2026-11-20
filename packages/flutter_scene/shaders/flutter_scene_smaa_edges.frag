@@ -9,6 +9,9 @@ uniform SmaaInfo {
   // Runtime quality (Scene.smaa): threshold, max search steps, max diagonal
   // search steps, corner rounding percentage.
   vec4 params;
+  // WR-88c: xy = the last texel center of the top-left sub-rectangle a frame
+  // renders into (v_uv is clamped to it); x = 0 when it fills the target.
+  vec4 bounds;
 }
 smaa_info;
 
@@ -22,15 +25,16 @@ out vec4 frag_color;
 #include <smaa.glsl>
 
 void main() {
+  vec2 uv = smaa_info.bounds.x > 0.0 ? min(v_uv, smaa_info.bounds.xy) : v_uv;
   vec4 offset0 =
-      SMAA_RT_METRICS.xyxy * vec4(-1.0, 0.0, 0.0, -1.0) + v_uv.xyxy;
+      SMAA_RT_METRICS.xyxy * vec4(-1.0, 0.0, 0.0, -1.0) + uv.xyxy;
   vec4 offset1 =
-      SMAA_RT_METRICS.xyxy * vec4(1.0, 0.0, 0.0, 1.0) + v_uv.xyxy;
+      SMAA_RT_METRICS.xyxy * vec4(1.0, 0.0, 0.0, 1.0) + uv.xyxy;
   vec4 offset2 =
-      SMAA_RT_METRICS.xyxy * vec4(-2.0, 0.0, 0.0, -2.0) + v_uv.xyxy;
+      SMAA_RT_METRICS.xyxy * vec4(-2.0, 0.0, 0.0, -2.0) + uv.xyxy;
 
   const vec3 weights = vec3(0.2126, 0.7152, 0.0722);
-  float l = dot(texture(scene_color, v_uv).rgb, weights);
+  float l = dot(texture(scene_color, uv).rgb, weights);
   float l_left = dot(texture(scene_color, offset0.xy).rgb, weights);
   float l_top = dot(texture(scene_color, offset0.zw).rgb, weights);
 

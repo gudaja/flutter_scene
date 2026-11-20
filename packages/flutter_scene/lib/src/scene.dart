@@ -194,6 +194,11 @@ enum AntiAliasingMode {
 /// It contains a root [Node] that serves as the entry point for all nodes in this `Scene`, and
 /// it provides methods for adding and removing nodes from the scene graph.
 /// {@category Scene graph}
+/// A screen view's output texture and transient pool for a frame whose
+/// targets are [size], rendered over [extent] of them (null: all of them).
+typedef _ViewTargets =
+    (gpu.Texture, TransientTexturePool) Function(ui.Size size, ui.Size? extent);
+
 base class Scene implements SceneGraph {
   int _renderMetadataStructureRevision = -1;
   int _materialInputStructureRevision = -1;
@@ -2861,8 +2866,9 @@ base class Scene implements SceneGraph {
       if (viewArea.isEmpty) continue;
       final scale =
           dpr * (view.renderScale ?? _renderScale) * adaptiveRenderScale;
-      final previous = surface.lastSwapchainColorTexture(i);
-      if (previous == null ||
+      final previous = surface.lastSwapchainExtent(i);
+      if (surface.lastSwapchainColorTexture(i) == null ||
+          previous == null ||
           previous.width != (viewArea.width * scale).ceil() ||
           previous.height != (viewArea.height * scale).ceil()) {
         return false;
@@ -2885,16 +2891,12 @@ base class Scene implements SceneGraph {
     for (var i = 0; i < screenViews.length; i++) {
       final view = screenViews[i];
       final previous = surface.lastSwapchainColorTexture(i);
+      final extent = surface.lastSwapchainExtent(i);
       final viewArea = _viewDrawArea(drawArea, view.viewport);
-      if (previous == null || viewArea.isEmpty) continue;
+      if (previous == null || extent == null || viewArea.isEmpty) continue;
       canvas.drawImageRect(
         _presentImage(previous, i),
-        ui.Rect.fromLTWH(
-          0,
-          0,
-          previous.width.toDouble(),
-          previous.height.toDouble(),
-        ),
+        ui.Rect.fromLTWH(0, 0, extent.width, extent.height),
         viewArea,
         ui.Paint()..filterQuality = view.filterQuality ?? filterQuality,
       );
@@ -2949,8 +2951,7 @@ base class Scene implements SceneGraph {
     if (!captureThisView &&
         maxGpuFramesInFlight > 0 &&
         previous != null &&
-        previous.width == pixelSize.width.toInt() &&
-        previous.height == pixelSize.height.toInt() &&
+        surface.lastSwapchainExtent(viewIndex) == pixelSize &&
         rendererSubmissions.priorFramesInFlight >= maxGpuFramesInFlight) {
       _pacedFrameCount++;
       _holdPace();
@@ -2972,16 +2973,25 @@ base class Scene implements SceneGraph {
       _pendingGraphCapture = null;
       capturer = RenderGraphCapturer(request: pendingCapture.request);
     }
-    final gpu.Texture swapchainColor = surface.getNextSwapchainColorTexture(
-      pixelSize,
-      viewIndex,
-    );
+    // WR-88c: a frame smaller than a kept size may render into its
+    // sub-rectangle; _renderViewToTexture decides once it knows the passes.
+    late gpu.Texture swapchainColor;
     _renderViewToTexture(
       view: view,
-      outputColor: swapchainColor,
+      targets: (ui.Size size, ui.Size? extent) {
+        swapchainColor = surface.getNextSwapchainColorTexture(
+          size,
+          viewIndex,
+          null,
+          extent,
+        );
+        return (swapchainColor, surface.transientTexturePool(viewIndex));
+      },
+      subrectTarget: capturer == null
+          ? surface.subrectTargetFor(pixelSize, viewIndex)
+          : null,
       pixelSize: pixelSize,
       viewportSize: drawArea.size,
-      pool: surface.transientTexturePool(viewIndex),
       environmentMap: environmentMap,
       transientsBuffer: transientsBuffer,
       lightComponent: lightComponent,
@@ -3230,13 +3240,18 @@ base class Scene implements SceneGraph {
   // render texture) has its own so simultaneous renders never share one.
   void _renderViewToTexture({
     required RenderView view,
-    required gpu.Texture outputColor,
+    // The output and the transient pool, given directly ([outputColor] and
+    // [pool]) or, for a screen view, through [targets] once the frame knows
+    // whether it renders into a sub-rectangle of [subrectTarget] (WR-88c).
+    gpu.Texture? outputColor,
+    _ViewTargets? targets,
+    ui.Size? subrectTarget,
     required ui.Size pixelSize,
     // The view's logical size, which the camera projection resolves against
     // (see CameraProjection.getProjectionMatrixForViewport). Defaults to
     // [pixelSize] for views with no logical size (render textures, probes).
     ui.Size? viewportSize,
-    required TransientTexturePool pool,
+    TransientTexturePool? pool,
     required EnvironmentMap environmentMap,
     required TransientWriter transientsBuffer,
     required DirectionalLightComponent? lightComponent,
@@ -3262,11 +3277,16 @@ base class Scene implements SceneGraph {
     if (_disposed) {
       throw StateError('A disposed Scene cannot render');
     }
+    assert((outputColor != null && pool != null) != (targets != null));
+    if (targets != null && (capturer != null || subrectTarget == null)) {
+      (outputColor, pool) = targets(pixelSize, null);
+      targets = null;
+    }
     // A capture frame observes the pool from graph construction on, so
     // display-chain and custom-pass destinations acquired before execute are
     // attributed and identified by their descriptor debug names.
     if (capturer != null) {
-      pool = ObservedTexturePool(pool, capturer);
+      pool = ObservedTexturePool(pool!, capturer);
     }
     final viewStats = renderStats.beginView(
       viewIndex: viewIndex,
@@ -3580,6 +3600,7 @@ base class Scene implements SceneGraph {
     // Planar reflection captures render right after the shadow atlas they
     // reuse and before the view's own scene work, so mirror surfaces sample
     // this frame's captures. A frame without reflectors adds nothing here.
+    var planarCaptured = false;
     if (capturePlanarReflections && !captureLinearColor) {
       final capturePasses = _buildPlanarCapturePasses(
         view: view,
@@ -3594,6 +3615,7 @@ base class Scene implements SceneGraph {
       for (final pass in capturePasses) {
         graph.addPass(pass);
       }
+      planarCaptured = capturePasses.isNotEmpty;
     }
     // Ambient occlusion, screen-space reflections, normals, and materials
     // that sample scene depth need the geometry prepass. Depth-only post
@@ -3826,6 +3848,50 @@ base class Scene implements SceneGraph {
         );
       }
     }
+    // WR-88c: a screen view whose frame runs only the passes that honor a
+    // sub-rectangle renders into the larger kept targets ([subrectTarget])
+    // instead of allocating a set at its own size.
+    RenderExtent? extent;
+    var targetSize = pixelSize;
+    if (targets != null) {
+      final subrect =
+          subrectTarget != null &&
+          !debugActive &&
+          !enableMsaa &&
+          !enableFxaa &&
+          !enableTaa &&
+          !wantDof &&
+          !patchTranslucentDepth &&
+          !wantGodRays &&
+          !wantScreenDistortion &&
+          customInputs.isEmpty &&
+          !_renderPasses.any((pass) => pass.enabled) &&
+          !postProcess.customEffects.any((effect) => effect.enabled) &&
+          !postProcess.bloom.enabled &&
+          !postProcess.chromaticAberration.enabled &&
+          !autoExposure.enabled &&
+          !displayReferredActive &&
+          !captureOpaqueColor &&
+          !bindSceneDepth &&
+          !wantSsr &&
+          !wantSceneColorHistory &&
+          !wantDepthPrepass &&
+          !captureLinearColor &&
+          !planarCaptured &&
+          !sceneHasHighlights(renderScene);
+      if (subrect) {
+        targetSize = subrectTarget;
+        extent = RenderExtent(
+          width: pixelSize.width.toInt(),
+          height: pixelSize.height.toInt(),
+          targetWidth: targetSize.width.toInt(),
+          targetHeight: targetSize.height.toInt(),
+        );
+      }
+      (outputColor, pool) = targets(targetSize, subrect ? pixelSize : null);
+    }
+    final frameOutput = outputColor!;
+    final texturePool = pool!;
     graph.addPass(
       ScenePass(
         camera: camera,
@@ -3863,7 +3929,7 @@ base class Scene implements SceneGraph {
         fog: fog,
         captureOpaqueColor: captureOpaqueColor,
         displayReferredLayer: displayReferredActive,
-        displayReferredFormat: outputColor.format,
+        displayReferredFormat: frameOutput.format,
         // TAA resolves the scene color only, and the layer composites after
         // that, so it draws unjittered or it would shake by the jitter every
         // frame. Its depth test still runs against the jittered scene depth,
@@ -3891,10 +3957,10 @@ base class Scene implements SceneGraph {
       _ssgiHistoryViewProjection = camera.getViewTransform(pixelSize);
     }
     if (captureLinearColor) {
-      graph.addPass(SceneColorBlitPass(output: outputColor));
+      graph.addPass(SceneColorBlitPass(output: frameOutput));
       graph.execute(
         transientsBuffer: transientsBuffer,
-        texturePool: pool,
+        texturePool: texturePool,
         observer: capturer,
         stats: viewStats,
       );
@@ -3927,8 +3993,9 @@ base class Scene implements SceneGraph {
       }
     }
 
-    final width = pixelSize.width.toInt();
-    final height = pixelSize.height.toInt();
+    // Pooled display-chain targets match the frame's targets (WR-88c).
+    final width = targetSize.width.toInt();
+    final height = targetSize.height.toInt();
     final postTime =
         DateTime.now().millisecondsSinceEpoch.remainder(100000) / 1000.0;
 
@@ -3941,7 +4008,7 @@ base class Scene implements SceneGraph {
           pass: _godRaysPass,
           camera: camera,
           dimensions: pixelSize,
-          destination: pool.acquire(
+          destination: texturePool.acquire(
             TransientTextureDescriptor.color(
               width: width,
               height: height,
@@ -3976,7 +4043,7 @@ base class Scene implements SceneGraph {
       RenderStage.afterScene,
       camera,
       pixelSize,
-      pool,
+      texturePool,
       width,
       height,
       view.layerMask,
@@ -4001,7 +4068,7 @@ base class Scene implements SceneGraph {
     // HDR buffers and republishing the scene-color handle that bloom and
     // the resolve read.
     for (var i = 0; i < beforeTonemap.length; i++) {
-      final output = pool.acquire(
+      final output = texturePool.acquire(
         TransientTextureDescriptor.color(
           width: width,
           height: height,
@@ -4082,7 +4149,7 @@ base class Scene implements SceneGraph {
       RenderStage.beforeToneMapping,
       camera,
       pixelSize,
-      pool,
+      texturePool,
       width,
       height,
       view.layerMask,
@@ -4225,7 +4292,7 @@ base class Scene implements SceneGraph {
           camera: camera,
           renderScene: renderScene,
           dimensions: pixelSize,
-          colorFormat: outputColor.format,
+          colorFormat: frameOutput.format,
           layerMask: view.layerMask,
         ),
       );
@@ -4241,26 +4308,46 @@ base class Scene implements SceneGraph {
     for (var i = 0; i < displaySteps.length; i++) {
       final isLast = i == displaySteps.length - 1;
       final output = isLast
-          ? outputColor
-          : pool.acquire(
+          ? frameOutput
+          : texturePool.acquire(
               TransientTextureDescriptor.color(
                 width: width,
                 height: height,
-                format: outputColor.format,
+                format: frameOutput.format,
                 debugName: 'display_step_$i',
               ),
             );
       graph.addPass(displaySteps[i](output));
     }
 
+    assert(
+      extent == null || graph.passes.every(_honorsRenderExtent),
+      'A sub-rectangle frame runs a pass that fills its target: '
+      '${graph.passes.where((p) => !_honorsRenderExtent(p)).map((p) => p.name)}',
+    );
     graph.execute(
       transientsBuffer: transientsBuffer,
-      texturePool: pool,
+      texturePool: texturePool,
       observer: capturer,
       stats: viewStats,
+      extent: extent,
     );
     _finishViewStats(viewStats, viewWatch);
   }
+
+  // Passes a sub-rectangle frame (WR-88c) may run: they draw through
+  // RenderGraphContext.extent, or (the shadow passes) render targets whose
+  // size does not follow the view.
+  static bool _honorsRenderExtent(RenderGraphPass pass) =>
+      _extentPasses.contains(pass.name);
+
+  static const _extentPasses = {
+    'ScenePass',
+    'ResolvePass',
+    'SmaaPass',
+    'ShadowPass',
+    'ShadowCatcherBakePass',
+  };
 
   // Closes a view's stats scope: its CPU time and its counter totals summed
   // over the passes it ran.

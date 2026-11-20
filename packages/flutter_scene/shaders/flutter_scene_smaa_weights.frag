@@ -11,6 +11,9 @@ uniform SmaaInfo {
   // Runtime quality (Scene.smaa): threshold, max search steps, max diagonal
   // search steps, corner rounding percentage.
   vec4 params;
+  // WR-88c: xy = the last texel center of the top-left sub-rectangle a frame
+  // renders into (v_uv is clamped to it); x = 0 when it fills the target.
+  vec4 bounds;
 }
 smaa_info;
 
@@ -24,26 +27,27 @@ out vec4 frag_color;
 #include <smaa.glsl>
 
 void main() {
-  vec2 pixcoord = v_uv * SMAA_RT_METRICS.zw;
+  vec2 uv = smaa_info.bounds.x > 0.0 ? min(v_uv, smaa_info.bounds.xy) : v_uv;
+  vec2 pixcoord = uv * SMAA_RT_METRICS.zw;
   // The pre-offset search coordinates (see @PSEUDO_GATHER4 in the
   // reference; computed in the vertex stage there).
   vec4 offset0 = SMAA_RT_METRICS.xyxy * vec4(-0.25, -0.125, 1.25, -0.125) +
-                 v_uv.xyxy;
+                 uv.xyxy;
   vec4 offset1 = SMAA_RT_METRICS.xyxy * vec4(-0.125, -0.25, -0.125, 1.25) +
-                 v_uv.xyxy;
+                 uv.xyxy;
   vec4 offset2 = SMAA_RT_METRICS.xxyy *
                      (vec4(-2.0, 2.0, -2.0, 2.0) *
                       float(SMAA_MAX_SEARCH_STEPS)) +
                  vec4(offset0.xz, offset1.yw);
 
   vec4 weights = vec4(0.0);
-  vec2 e = texture(edges_texture, v_uv).rg;
+  vec2 e = texture(edges_texture, uv).rg;
 
   if (e.g > 0.0) {
     // Edge at north. Diagonals have both north and west edges, so checking
     // one boundary is enough; a found diagonal skips the orthogonal search.
     weights.rg =
-        SmaaCalculateDiagWeights(edges_texture, area_texture, v_uv, e);
+        SmaaCalculateDiagWeights(edges_texture, area_texture, uv, e);
     if (weights.r == -weights.g) {
       vec2 d;
       vec3 coords;
@@ -67,7 +71,7 @@ void main() {
 
       weights.rg = SmaaArea(area_texture, sqrt_d, e1, e2);
 
-      coords.y = v_uv.y;
+      coords.y = uv.y;
       SmaaDetectHorizontalCornerPattern(edges_texture, weights.rg,
                                         coords.xyzy, d);
     } else {
@@ -100,7 +104,7 @@ void main() {
 
     weights.ba = SmaaArea(area_texture, sqrt_d, e1, e2);
 
-    coords.x = v_uv.x;
+    coords.x = uv.x;
     SmaaDetectVerticalCornerPattern(edges_texture, weights.ba, coords.xyxz,
                                     d);
   }

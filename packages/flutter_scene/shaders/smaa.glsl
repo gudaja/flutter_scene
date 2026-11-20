@@ -49,6 +49,23 @@
 #define SMAA_MAX_SEARCH_STEPS int(smaa_info.params.y)
 #define SMAA_MAX_SEARCH_STEPS_DIAG int(smaa_info.params.z)
 #define SMAA_CORNER_ROUNDING smaa_info.params.w
+
+// WR-88c: a frame rendered into the top-left sub-rectangle of larger targets
+// (smaa_info.bounds.x > 0) clamps every edges-texture fetch to the last texel
+// center inside it, so the line searches see the repeated edge a
+// clamp-to-edge sampler gives at a real border instead of the cleared texels
+// beyond. Otherwise the fetch is the reference one.
+#define SMAA_EDGES(tex, coord)                                          \
+  (smaa_info.bounds.x > 0.0                                             \
+       ? textureLod(tex, min((coord), smaa_info.bounds.xy), 0.0)        \
+       : textureLod(tex, (coord), 0.0))
+#define SMAA_EDGES_OFFSET(tex, coord, off)                              \
+  (smaa_info.bounds.x > 0.0                                             \
+       ? textureLod(tex,                                                \
+                    min((coord) + vec2(off) * SMAA_RT_METRICS.xy,       \
+                        smaa_info.bounds.xy),                           \
+                    0.0)                                                \
+       : textureLodOffset(tex, (coord), 0.0, off))
 #define SMAA_LOCAL_CONTRAST_ADAPTATION_FACTOR 2.0
 
 #define SMAA_AREATEX_MAX_DISTANCE 16.0
@@ -97,7 +114,7 @@ vec2 SmaaSearchDiag1(sampler2D edges_tex, vec2 texcoord, vec2 dir,
       break;
     }
     coord.xyz = t * vec3(dir, 1.0) + coord.xyz;
-    e = textureLod(edges_tex, coord.xy, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, coord.xy).rg;
     coord.w = dot(e, vec2(0.5, 0.5));
   }
   return coord.zw;
@@ -115,7 +132,7 @@ vec2 SmaaSearchDiag2(sampler2D edges_tex, vec2 texcoord, vec2 dir,
       break;
     }
     coord.xyz = t * vec3(dir, 1.0) + coord.xyz;
-    e = textureLod(edges_tex, coord.xy, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, coord.xy).rg;
     e = SmaaDecodeDiagBilinearAccess2(e);
     coord.w = dot(e, vec2(0.5, 0.5));
   }
@@ -154,8 +171,8 @@ vec2 SmaaCalculateDiagWeights(sampler2D edges_tex, sampler2D area_tex,
                       SMAA_RT_METRICS.xyxy +
                   texcoord.xyxy;
     vec4 c;
-    c.xy = textureLodOffset(edges_tex, coords.xy, 0.0, ivec2(-1, 0)).rg;
-    c.zw = textureLodOffset(edges_tex, coords.zw, 0.0, ivec2(1, 0)).rg;
+    c.xy = SMAA_EDGES_OFFSET(edges_tex, coords.xy, ivec2(-1, 0)).rg;
+    c.zw = SMAA_EDGES_OFFSET(edges_tex, coords.zw, ivec2(1, 0)).rg;
     c.yxwz = SmaaDecodeDiagBilinearAccess4(c.xyzw);
     vec2 cc = vec2(2.0) * c.xz + c.yw;
     SmaaMovc2(bvec2(step(0.9, d.zw)), cc, vec2(0.0));
@@ -163,7 +180,7 @@ vec2 SmaaCalculateDiagWeights(sampler2D edges_tex, sampler2D area_tex,
   }
 
   d.xz = SmaaSearchDiag2(edges_tex, texcoord, vec2(-1.0, -1.0), end);
-  if (textureLodOffset(edges_tex, texcoord, 0.0, ivec2(1, 0)).r > 0.0) {
+  if (SMAA_EDGES_OFFSET(edges_tex, texcoord, ivec2(1, 0)).r > 0.0) {
     d.yw = SmaaSearchDiag2(edges_tex, texcoord, vec2(1.0, 1.0), end);
     d.y += float(end.y > 0.9);
   } else {
@@ -174,9 +191,9 @@ vec2 SmaaCalculateDiagWeights(sampler2D edges_tex, sampler2D area_tex,
     vec4 coords = vec4(-d.x, -d.x, d.y, d.y) * SMAA_RT_METRICS.xyxy +
                   texcoord.xyxy;
     vec4 c;
-    c.x = textureLodOffset(edges_tex, coords.xy, 0.0, ivec2(-1, 0)).g;
-    c.y = textureLodOffset(edges_tex, coords.xy, 0.0, ivec2(0, -1)).r;
-    c.zw = textureLodOffset(edges_tex, coords.zw, 0.0, ivec2(1, 0)).gr;
+    c.x = SMAA_EDGES_OFFSET(edges_tex, coords.xy, ivec2(-1, 0)).g;
+    c.y = SMAA_EDGES_OFFSET(edges_tex, coords.xy, ivec2(0, -1)).r;
+    c.zw = SMAA_EDGES_OFFSET(edges_tex, coords.zw, ivec2(1, 0)).gr;
     vec2 cc = vec2(2.0) * c.xz + c.yw;
     SmaaMovc2(bvec2(step(0.9, d.zw)), cc, vec2(0.0));
     weights += SmaaAreaDiag(area_tex, d.xy, cc, 0.0).gr;
@@ -207,7 +224,7 @@ float SmaaSearchXLeft(sampler2D edges_tex, sampler2D search_tex,
     if (!(texcoord.x > end && e.g > 0.8281 && e.r == 0.0)) {
       break;
     }
-    e = textureLod(edges_tex, texcoord, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, texcoord).rg;
     texcoord = -vec2(2.0, 0.0) * SMAA_RT_METRICS.xy + texcoord;
   }
   float offset =
@@ -222,7 +239,7 @@ float SmaaSearchXRight(sampler2D edges_tex, sampler2D search_tex,
     if (!(texcoord.x < end && e.g > 0.8281 && e.r == 0.0)) {
       break;
     }
-    e = textureLod(edges_tex, texcoord, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, texcoord).rg;
     texcoord = vec2(2.0, 0.0) * SMAA_RT_METRICS.xy + texcoord;
   }
   float offset =
@@ -237,7 +254,7 @@ float SmaaSearchYUp(sampler2D edges_tex, sampler2D search_tex, vec2 texcoord,
     if (!(texcoord.y > end && e.r > 0.8281 && e.g == 0.0)) {
       break;
     }
-    e = textureLod(edges_tex, texcoord, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, texcoord).rg;
     texcoord = -vec2(0.0, 2.0) * SMAA_RT_METRICS.xy + texcoord;
   }
   float offset =
@@ -252,7 +269,7 @@ float SmaaSearchYDown(sampler2D edges_tex, sampler2D search_tex,
     if (!(texcoord.y < end && e.r > 0.8281 && e.g == 0.0)) {
       break;
     }
-    e = textureLod(edges_tex, texcoord, 0.0).rg;
+    e = SMAA_EDGES(edges_tex, texcoord).rg;
     texcoord = vec2(0.0, 2.0) * SMAA_RT_METRICS.xy + texcoord;
   }
   float offset =
@@ -282,13 +299,13 @@ void SmaaDetectHorizontalCornerPattern(sampler2D edges_tex,
 
   vec2 factor = vec2(1.0);
   factor.x -= rounding.x *
-              textureLodOffset(edges_tex, texcoord.xy, 0.0, ivec2(0, 1)).r;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.xy, ivec2(0, 1)).r;
   factor.x -= rounding.y *
-              textureLodOffset(edges_tex, texcoord.zw, 0.0, ivec2(1, 1)).r;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.zw, ivec2(1, 1)).r;
   factor.y -= rounding.x *
-              textureLodOffset(edges_tex, texcoord.xy, 0.0, ivec2(0, -2)).r;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.xy, ivec2(0, -2)).r;
   factor.y -= rounding.y *
-              textureLodOffset(edges_tex, texcoord.zw, 0.0, ivec2(1, -2)).r;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.zw, ivec2(1, -2)).r;
   weights *= clamp(factor, 0.0, 1.0);
 }
 
@@ -300,12 +317,12 @@ void SmaaDetectVerticalCornerPattern(sampler2D edges_tex, inout vec2 weights,
 
   vec2 factor = vec2(1.0);
   factor.x -= rounding.x *
-              textureLodOffset(edges_tex, texcoord.xy, 0.0, ivec2(1, 0)).g;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.xy, ivec2(1, 0)).g;
   factor.x -= rounding.y *
-              textureLodOffset(edges_tex, texcoord.zw, 0.0, ivec2(1, 1)).g;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.zw, ivec2(1, 1)).g;
   factor.y -= rounding.x *
-              textureLodOffset(edges_tex, texcoord.xy, 0.0, ivec2(-2, 0)).g;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.xy, ivec2(-2, 0)).g;
   factor.y -= rounding.y *
-              textureLodOffset(edges_tex, texcoord.zw, 0.0, ivec2(-2, 1)).g;
+              SMAA_EDGES_OFFSET(edges_tex, texcoord.zw, ivec2(-2, 1)).g;
   weights *= clamp(factor, 0.0, 1.0);
 }

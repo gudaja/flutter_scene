@@ -497,11 +497,74 @@ class RenderGraphContext {
     required this.transientsBuffer,
     required this.texturePool,
     required this.blackboard,
+    this.extent,
   });
 
   final TransientWriter transientsBuffer;
   final TransientTexturePool texturePool;
   final Blackboard blackboard;
+
+  /// The sub-rectangle of larger render targets this frame renders into,
+  /// or null when it fills them. See [RenderExtent].
+  final RenderExtent? extent;
+}
+
+/// A frame rendered into the top-left sub-rectangle of render targets
+/// sized for a larger resolution, so a render scale that drops while the
+/// camera moves reuses the full-resolution targets instead of allocating a
+/// second set at the smaller size.
+///
+/// Geometry passes draw with the viewport and scissor set to the
+/// sub-rectangle ([applyGeometry]); full-screen passes keep the whole-target
+/// viewport, so `v_uv` addresses the target's texels one to one, and scissor
+/// to the sub-rectangle plus one column and row ([applyScreen]). Their
+/// shaders clamp `v_uv` to the last texel center inside it ([uvMaxX],
+/// [uvMaxY]), so that extra column and row repeat the edge, as a
+/// clamp-to-edge sampler would at a real border, for the bilinear
+/// compositing and the next pass's neighbor reads.
+class RenderExtent {
+  const RenderExtent({
+    required this.width,
+    required this.height,
+    required this.targetWidth,
+    required this.targetHeight,
+  }) : assert(width <= targetWidth && height <= targetHeight);
+
+  /// The rendered size in pixels, from the targets' top-left corner.
+  final int width;
+  final int height;
+
+  /// The size of the render targets.
+  final int targetWidth;
+  final int targetHeight;
+
+  /// The largest `v_uv` a full-screen pass samples: the last texel center
+  /// inside the sub-rectangle.
+  double get uvMaxX => (width - 0.5) / targetWidth;
+  double get uvMaxY => (height - 0.5) / targetHeight;
+
+  /// Restricts a geometry pass (one drawn through the camera projection) to
+  /// the sub-rectangle.
+  void applyGeometry(gpu.RenderPass pass) {
+    pass.setViewport(gpu.Viewport(width: width, height: height));
+    pass.setScissor(gpu.Scissor(width: width, height: height));
+  }
+
+  /// Restricts a full-screen pass to the sub-rectangle and its repeated
+  /// edge column and row.
+  void applyScreen(gpu.RenderPass pass) {
+    pass.setScissor(
+      gpu.Scissor(
+        width: width < targetWidth ? width + 1 : width,
+        height: height < targetHeight ? height + 1 : height,
+      ),
+    );
+  }
+
+  /// [uvMaxX] and [uvMaxY] for [extent], or a bound no `v_uv` reaches when
+  /// the frame fills its targets (the clamp is then the identity).
+  static (double, double) uvMaxOf(RenderExtent? extent) =>
+      extent == null ? (2.0, 2.0) : (extent.uvMaxX, extent.uvMaxY);
 }
 
 /// A single unit of rendering work in a [RenderGraph].
@@ -536,6 +599,10 @@ class RenderGraph {
   static final RenderProfileAccumulator _profile = RenderProfileAccumulator();
 
   final List<RenderGraphPass> _passes = [];
+
+  /// The passes in execution order.
+  @internal
+  List<RenderGraphPass> get passes => List.unmodifiable(_passes);
   final Blackboard _blackboard = Blackboard();
 
   /// Appends [pass] to the end of the execution order.
@@ -556,6 +623,7 @@ class RenderGraph {
     required TransientTexturePool texturePool,
     RenderGraphObserver? observer,
     RenderViewStats? stats,
+    RenderExtent? extent,
   }) {
     _blackboard._clear();
     // An observer that also records draws gets the encoders' draw context
@@ -569,6 +637,7 @@ class RenderGraph {
       blackboard: observer == null
           ? _blackboard
           : _RecordingBlackboard(_blackboard, observer),
+      extent: extent,
     );
     final timeline = RenderStats.timelineEvents;
     final stopwatch = Stopwatch();

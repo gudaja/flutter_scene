@@ -72,7 +72,24 @@ class Surface {
     Size size, [
     int viewIndex = 0,
     gpu.PixelFormat? format,
-  ]) => _view(viewIndex).nextSwapchainColor(size, format);
+    Size? extent,
+  ]) => _view(viewIndex).nextSwapchainColor(size, format, extent);
+
+  /// The size of view [viewIndex]'s kept targets that a frame of [size] can
+  /// render into the top-left sub-rectangle of (WR-88c), or null when no
+  /// larger size is kept. A render scale that drops while the camera moves
+  /// then reuses the full-resolution targets instead of a second set.
+  @internal
+  Size? subrectTargetFor(
+    Size size, [
+    int viewIndex = 0,
+    gpu.PixelFormat? format,
+  ]) => _view(viewIndex).subrectTargetFor(size, format);
+
+  /// The rendered size of the texture [lastSwapchainColorTexture] returns:
+  /// its full size, or the sub-rectangle a frame rendered into.
+  Size? lastSwapchainExtent([int viewIndex = 0]) =>
+      _view(viewIndex)._lastExtent;
 
   /// The color texture most recently issued for [viewIndex] (the previous
   /// frame's output once the next frame begins), or null before the first
@@ -208,6 +225,10 @@ class _ViewSurface {
   // Most recently used last.
   final List<_SizedTargets> _sizes = [];
 
+  /// The rendered size of [_lastIssued] (smaller than the texture when a
+  /// frame rendered into a sub-rectangle).
+  Size? _lastExtent;
+
   /// Attachments whose size does not follow the output (the shadow atlas),
   /// shared by every size's pool so a render scale that toggles keeps one
   /// copy of them. Shapes it stops using are released.
@@ -248,7 +269,26 @@ class _ViewSurface {
     return bytes;
   }
 
-  gpu.Texture nextSwapchainColor(Size size, [gpu.PixelFormat? format]) {
+  Size? subrectTargetFor(Size size, gpu.PixelFormat? format) {
+    _SizedTargets? best;
+    for (final sized in _sizes) {
+      if (sized.format != format || sized.size == size) continue;
+      if (sized.size.width < size.width || sized.size.height < size.height) {
+        continue;
+      }
+      final area = sized.size.width * sized.size.height;
+      if (best == null || area < best.size.width * best.size.height) {
+        best = sized;
+      }
+    }
+    return best?.size;
+  }
+
+  gpu.Texture nextSwapchainColor(
+    Size size, [
+    gpu.PixelFormat? format,
+    Size? extent,
+  ]) {
     _frame++;
     var sized = _sizes.isEmpty ? null : _sizes.last;
     if (sized == null || sized.size != size || sized.format != format) {
@@ -261,6 +301,19 @@ class _ViewSurface {
           ? _SizedTargets(size, format, _sizeIndependent)
           : _sizes.removeAt(index);
       _sizes.add(sized);
+      // WR-88c: a smaller size renders into this one's sub-rectangle from now
+      // on, so its own targets are not needed.
+      final kept = sized;
+      _sizes.removeWhere((s) {
+        if (identical(s, kept) ||
+            s.format != format ||
+            s.size.width > size.width ||
+            s.size.height > size.height) {
+          return false;
+        }
+        s.release();
+        return true;
+      });
       while (_sizes.length > _keptSizes) {
         _sizes.removeAt(0).release();
       }
@@ -289,6 +342,7 @@ class _ViewSurface {
     final result = colors[sized.cursor];
     sized.cursor = (sized.cursor + 1) % Surface._maxFramesInFlight;
     _lastIssued = result;
+    _lastExtent = extent ?? size;
     return result;
   }
 
@@ -307,5 +361,6 @@ class _ViewSurface {
     _sizes.clear();
     _sizeIndependent.clear();
     _lastIssued = null;
+    _lastExtent = null;
   }
 }

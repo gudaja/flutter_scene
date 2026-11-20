@@ -51,7 +51,14 @@ Future<void> _frame(Scene scene, {int width = 64, int height = 32}) async {
   } finally {
     recorder.endRecording().dispose();
   }
-  for (var i = 0; i < 50 && rendererSubmissions.framesInFlight > 0; i++) {
+  // Every submission, not only the frame's last: uploads trail the frame.
+  for (
+    var i = 0;
+    i < 100 &&
+        rendererSubmissions.completedThrough <
+            rendererSubmissions.latestSubmission;
+    i++
+  ) {
     await Future<void>.delayed(const Duration(milliseconds: 5));
   }
 }
@@ -187,10 +194,8 @@ void main() {
         ..add(_ground()..castsShadows = false);
       await _frame(scene);
       await _frame(scene);
-      expect(
-        _held(scene).keys.where((d) => d.format == gpu.PixelFormat.r32Float),
-        isEmpty,
-      );
+      expect(_named(scene, _atlasName), isEmpty);
+      expect(_named(scene, _atlasDepthName), isEmpty);
       // A caster appearing brings the atlas back.
       scene.add(_caster());
       await _frame(scene);

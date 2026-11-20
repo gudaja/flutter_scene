@@ -75,6 +75,7 @@ class PunctualLighting {
     this.spotShadowDepthBias = 0.0,
     this.spotShadowNormalBias = 0.0,
     this.spotShadowSoftness = 0.0,
+    this.shadowTileScale = 0.0,
     this.internalBuffer,
   });
 
@@ -91,6 +92,7 @@ class PunctualLighting {
       spotShadowDepthBias = 0.0,
       spotShadowNormalBias = 0.0,
       spotShadowSoftness = 0.0,
+      shadowTileScale = 0.0,
       internalBuffer = null;
 
   /// The buffer that built this result, for per-view froxel builds
@@ -122,6 +124,13 @@ class PunctualLighting {
   /// directional cascades in the shared shadow atlas, and their matrices ride
   /// in the params texture). Zero disables spot shadow sampling.
   final int spotShadowCount;
+
+  /// The spot and point shadow tiles' edge over the directional cascades'
+  /// tile edge in the shared atlas, when they render at their own smaller
+  /// resolution (`Scene.punctualShadowsAtOwnResolution`); 0 when every tile
+  /// is one size. The lit shader packs such tiles in columns after the
+  /// cascades (see `LampTileUv`).
+  final double shadowTileScale;
 
   /// Number of atlas tiles claimed by shadow-casting point lights (two per
   /// caster, following the spot tiles). Zero disables point shadow sampling.
@@ -312,6 +321,7 @@ class PunctualLightBuffer {
     // shader clamps its kernel with this, so it has to be the size the faces
     // actually got.
     int pointFaceResolution = 512,
+    double shadowTileScale = 0.0,
     bool enableFroxels = true,
   }) {
     // One build per frame, so this is where the rings roll over.
@@ -446,6 +456,7 @@ class PunctualLightBuffer {
         spotShadowDepthBias: spotShadows?.depthBias ?? 0.0,
         spotShadowNormalBias: spotShadows?.normalBias ?? 0.0,
         spotShadowSoftness: spotShadows?.softness ?? 0.0,
+        shadowTileScale: shadowTileScale,
         internalBuffer: _froxelsEligible ? this : null,
       );
     }
@@ -476,6 +487,7 @@ class PunctualLightBuffer {
       spotShadowDepthBias: spotShadows?.depthBias ?? 0.0,
       spotShadowNormalBias: spotShadows?.normalBias ?? 0.0,
       spotShadowSoftness: spotShadows?.softness ?? 0.0,
+      shadowTileScale: shadowTileScale,
       internalBuffer: _froxelsEligible ? this : null,
     );
   }

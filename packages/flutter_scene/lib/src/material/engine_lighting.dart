@@ -292,7 +292,10 @@ class EngineLightingUniforms {
     fragInfo[204] = cameraPosition?.x ?? 0.0;
     fragInfo[205] = cameraPosition?.y ?? 0.0;
     fragInfo[206] = cameraPosition?.z ?? 0.0;
-    fragInfo[207] = 0.0;
+    // camera_position.w [207]: the spot and point shadow tiles' edge over the
+    // cascade tile edge when they render smaller (0 = one size; see
+    // LampTileUv in material_shadow_sampling.glsl).
+    fragInfo[207] = lighting.punctualShadowTileScale;
     // spot_shadow_params [12..15] (more of the unused SH region): the shared
     // spot-shadow parameters. x is the total non-cascade tile count (spot
     // tiles then point-shadow tiles); 0 disables both spot and point shadow

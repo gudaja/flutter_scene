@@ -130,6 +130,14 @@ class ObservedTexturePool extends TransientTexturePool {
 
   @override
   int get residentBytes => _inner.residentBytes;
+
+  @override
+  TransientTexturePool get sizeIndependent {
+    final inner = _inner.sizeIndependent;
+    return identical(inner, _inner)
+        ? this
+        : ObservedTexturePool(inner, _observer);
+  }
 }
 
 /// Description of a transient GPU texture requested from a
@@ -247,27 +255,119 @@ class TransientTextureDescriptor {
 /// across frames.
 ///
 /// Keyed by [TransientTextureDescriptor]; for each descriptor it keeps a
-/// ring of [framesInFlight] textures so a texture written this frame is
+/// ring of up to [framesInFlight] textures so a texture written this frame is
 /// not overwritten while an earlier frame still references it. This is the
 /// minimal "transient resource" mechanism — there is no intra-frame
 /// lifetime aliasing; a pass that needs two simultaneously-live textures
 /// of the same shape must give them distinct [TransientTextureDescriptor.debugName]s.
+///
+/// A frame reuses the lowest ring slot whose last frame's GPU work has
+/// completed ([rendererSubmissions]), and only falls back to rotating through
+/// the ring while earlier frames are still running. A paced scene (the
+/// default `Scene.maxGpuFramesInFlight` of 1) encodes a frame only once the
+/// previous one finished, so it keeps one slot; a slot left unused for
+/// [kRingSlotIdleFrames] frames is released. One slot index serves every
+/// descriptor in a frame, so a color target and its depth attachment keep
+/// pairing the same way they did (backends cache a framebuffer per color
+/// texture).
 class TransientTexturePool {
-  TransientTexturePool({this.framesInFlight = 2});
+  TransientTexturePool({
+    this.framesInFlight = 2,
+    TransientTexturePool? sizeIndependent,
+    this.releaseUnusedShapes = false,
+  }) : _sizeIndependent = sizeIndependent,
+       _slotStamps = List<int>.filled(framesInFlight, 0),
+       _slotLastUsed = List<int>.filled(framesInFlight, 0);
 
   final int framesInFlight;
-  final Map<TransientTextureDescriptor, List<gpu.Texture?>> _rings = {};
+
+  /// Whether a descriptor not acquired for [kUnusedShapeFrames] frames, or
+  /// one superseded by another shape under the same
+  /// [TransientTextureDescriptor.debugName], is released once its last
+  /// frame's GPU work completes. Meant for a pool of textures whose size does
+  /// not follow the output (a shadow atlas grows and shrinks with its tile
+  /// count), where an old shape would otherwise stay beside the new one.
+  final bool releaseUnusedShapes;
+
+  final TransientTexturePool? _sizeIndependent;
+  final Map<TransientTextureDescriptor, _PoolRing> _rings = {};
+  final List<int> _slotStamps;
+  final List<int> _slotLastUsed;
   int _frame = 0;
+  int _frameCount = 0;
+
+  /// Frames a ring slot other than the one in use may sit idle before its
+  /// textures are released.
+  static const int kRingSlotIdleFrames = 60;
+
+  /// Frames a descriptor may go unacquired before a pool with
+  /// [releaseUnusedShapes] releases it.
+  static const int kUnusedShapeFrames = 60;
 
   /// Textures every [TransientTexturePool] has created. For tests that check
   /// steady-state rendering allocates nothing.
   @visibleForTesting
   static int texturesCreated = 0;
 
+  /// The pool for attachments whose size does not depend on the output size
+  /// (a shadow atlas), shared by the view's per-size pools so a view that
+  /// switches its render scale keeps one copy. This pool itself when it has
+  /// none.
+  TransientTexturePool get sizeIndependent => _sizeIndependent ?? this;
+
+  /// The ring slot the current frame acquires from.
+  @visibleForTesting
+  int get debugSlot => _frame;
+
   /// Advances to the next frame's ring slot. Call once per frame before
   /// any [acquire] calls.
   void beginFrame() {
-    _frame = (_frame + 1) % framesInFlight;
+    final submitted = rendererSubmissions.latestSubmission;
+    final done = rendererSubmissions.completedThrough;
+    // The frame that just ended may have work up to the latest submission.
+    if (_frameCount > 0) _slotStamps[_frame] = submitted;
+    _frameCount++;
+    var next = -1;
+    for (var slot = 0; slot < framesInFlight; slot++) {
+      if (_slotStamps[slot] <= done) {
+        next = slot;
+        break;
+      }
+    }
+    // Every slot still in flight: rotate, as the fixed ring always did.
+    if (next < 0) next = (_frame + 1) % framesInFlight;
+    _frame = next;
+    _slotLastUsed[_frame] = _frameCount;
+    for (var slot = 0; slot < framesInFlight; slot++) {
+      if (slot == _frame ||
+          _frameCount - _slotLastUsed[slot] <= kRingSlotIdleFrames ||
+          _slotStamps[slot] > done) {
+        continue;
+      }
+      for (final ring in _rings.values) {
+        ring.releaseSlot(slot);
+      }
+    }
+    if (releaseUnusedShapes) _releaseUnusedShapes(done);
+  }
+
+  void _releaseUnusedShapes(int done) {
+    final previous = _frameCount - 1;
+    final usedNames = <String?>{
+      for (final entry in _rings.entries)
+        if (entry.value.lastUsedFrame == previous) entry.key.debugName,
+    };
+    _rings.removeWhere((descriptor, ring) {
+      if (ring.lastUsedFrame == previous) {
+        ring.stamp = rendererSubmissions.latestSubmission;
+        return false;
+      }
+      final superseded = usedNames.contains(descriptor.debugName);
+      final idle = previous - ring.lastUsedFrame > kUnusedShapeFrames;
+      if ((!superseded && !idle) || ring.stamp > done) return false;
+      ring.releaseAll();
+      return true;
+    });
   }
 
   /// Returns a texture matching [descriptor] from the pool for the
@@ -275,9 +375,10 @@ class TransientTexturePool {
   gpu.Texture acquire(TransientTextureDescriptor descriptor) {
     final ring = _rings.putIfAbsent(
       descriptor,
-      () => List<gpu.Texture?>.filled(framesInFlight, null),
+      () => _PoolRing(framesInFlight),
     );
-    var texture = ring[_frame];
+    ring.lastUsedFrame = _frameCount;
+    var texture = ring.textures[_frame];
     if (texture == null) {
       texturesCreated++;
       texture = gpu.gpuContext.createTexture(
@@ -289,7 +390,7 @@ class TransientTexturePool {
         enableRenderTargetUsage: true,
         enableShaderReadUsage: descriptor.enableShaderReadUsage,
       );
-      ring[_frame] = texture;
+      ring.textures[_frame] = texture;
     }
     return texture;
   }
@@ -302,9 +403,7 @@ class TransientTexturePool {
   /// between frames. Work already submitted is unaffected.
   void clear() {
     for (final ring in _rings.values) {
-      for (final texture in ring) {
-        if (texture != null) gpu.gpuHost.releaseTexture(texture);
-      }
+      ring.releaseAll();
     }
     _rings.clear();
   }
@@ -313,7 +412,7 @@ class TransientTexturePool {
   int get residentBytes {
     var bytes = 0;
     for (final ring in _rings.values) {
-      for (final texture in ring) {
+      for (final texture in ring.textures) {
         if (texture != null) bytes += gpuTextureBytes(texture);
       }
     }
@@ -322,8 +421,46 @@ class TransientTexturePool {
 
   /// The number of textures the pool holds across every descriptor's ring.
   @internal
-  int get heldTextureCount =>
-      _rings.values.fold(0, (count, ring) => count + ring.nonNulls.length);
+  int get heldTextureCount => _rings.values.fold(
+    0,
+    (count, ring) => count + ring.textures.nonNulls.length,
+  );
+
+  /// The descriptors the pool holds textures for, each with its number of
+  /// live ring slots. For tests of what the pool keeps.
+  @visibleForTesting
+  Map<TransientTextureDescriptor, int> get debugHeld => {
+    for (final entry in _rings.entries)
+      if (entry.value.textures.any((t) => t != null))
+        entry.key: entry.value.textures.nonNulls.length,
+  };
+}
+
+/// One descriptor's ring of textures in a [TransientTexturePool].
+class _PoolRing {
+  _PoolRing(int slots) : textures = List<gpu.Texture?>.filled(slots, null);
+
+  final List<gpu.Texture?> textures;
+
+  /// The pool frame that last acquired from this ring.
+  int lastUsedFrame = 0;
+
+  /// The latest submission id when this ring was last used (stamped at the
+  /// pool's next frame), for pools that release unused shapes.
+  int stamp = 0;
+
+  void releaseSlot(int slot) {
+    final texture = textures[slot];
+    if (texture == null) return;
+    gpu.gpuHost.releaseTexture(texture);
+    textures[slot] = null;
+  }
+
+  void releaseAll() {
+    for (var slot = 0; slot < textures.length; slot++) {
+      releaseSlot(slot);
+    }
+  }
 }
 
 /// Per-frame state handed to every [RenderGraphPass] when the graph

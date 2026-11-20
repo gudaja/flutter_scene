@@ -190,7 +190,9 @@ uniform FragInfo {
   // off-center). z: 1 for an orthographic camera, whose extents are then the
   // half width and height, 0 for perspective. w unused.
   highp vec4 view_projection;
-  // xyz: the camera's world-space position. w unused.
+  // xyz: the camera's world-space position. w: the spot and point shadow
+  // tiles' edge over the cascade tile edge when they render smaller (0 when
+  // every atlas tile is one size; see LampTileUv).
   highp vec4 camera_position;
 }
 frag_info;

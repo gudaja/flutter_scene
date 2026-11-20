@@ -172,13 +172,15 @@ class Surface {
 /// One output size's render targets: the swapchain color ring and the
 /// transient texture pool.
 class _SizedTargets {
-  _SizedTargets(this.size, this.format);
+  _SizedTargets(this.size, this.format, TransientTexturePool sizeIndependent)
+    : pool = TransientTexturePool(
+        framesInFlight: Surface._maxFramesInFlight,
+        sizeIndependent: sizeIndependent,
+      );
 
   final Size size;
   final gpu.PixelFormat? format;
-  final TransientTexturePool pool = TransientTexturePool(
-    framesInFlight: Surface._maxFramesInFlight,
-  );
+  final TransientTexturePool pool;
   final List<gpu.Texture> swapchainColors = [];
   int cursor = 0;
 
@@ -205,18 +207,28 @@ class _ViewSurface {
 
   // Most recently used last.
   final List<_SizedTargets> _sizes = [];
+
+  /// Attachments whose size does not follow the output (the shadow atlas),
+  /// shared by every size's pool so a render scale that toggles keeps one
+  /// copy of them. Shapes it stops using are released.
+  final TransientTexturePool _sizeIndependent = TransientTexturePool(
+    framesInFlight: Surface._maxFramesInFlight,
+    releaseUnusedShapes: true,
+  );
   int _frame = 0;
   gpu.Texture? _lastIssued;
 
   _SizedTargets get _current {
-    if (_sizes.isEmpty) _sizes.add(_SizedTargets(Size.zero, null));
+    if (_sizes.isEmpty) {
+      _sizes.add(_SizedTargets(Size.zero, null, _sizeIndependent));
+    }
     return _sizes.last;
   }
 
   TransientTexturePool get pool => _current.pool;
 
   int get residentBytes {
-    var bytes = 0;
+    var bytes = _sizeIndependent.residentBytes;
     for (final sized in _sizes) {
       bytes += sized.pool.residentBytes;
     }
@@ -232,6 +244,7 @@ class _ViewSurface {
       _sizes.removeAt(0).release();
     }
     _sizes.lastOrNull?.pool.clear();
+    _sizeIndependent.clear();
     return bytes;
   }
 
@@ -244,7 +257,9 @@ class _ViewSurface {
       final index = _sizes.indexWhere(
         (s) => s.size == size && s.format == format,
       );
-      sized = index < 0 ? _SizedTargets(size, format) : _sizes.removeAt(index);
+      sized = index < 0
+          ? _SizedTargets(size, format, _sizeIndependent)
+          : _sizes.removeAt(index);
       _sizes.add(sized);
       while (_sizes.length > _keptSizes) {
         _sizes.removeAt(0).release();
@@ -257,6 +272,7 @@ class _ViewSurface {
       return true;
     });
     sized.pool.beginFrame();
+    _sizeIndependent.beginFrame();
     final colors = sized.swapchainColors;
     if (sized.cursor == colors.length) {
       colors.add(
@@ -277,7 +293,7 @@ class _ViewSurface {
   }
 
   int get heldTextureCount {
-    var count = 0;
+    var count = _sizeIndependent.heldTextureCount;
     for (final sized in _sizes) {
       count += sized.swapchainColors.length + sized.pool.heldTextureCount;
     }
@@ -289,6 +305,7 @@ class _ViewSurface {
       sized.release();
     }
     _sizes.clear();
+    _sizeIndependent.clear();
     _lastIssued = null;
   }
 }

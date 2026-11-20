@@ -682,6 +682,27 @@ base class Scene implements SceneGraph {
   /// {@category Rendering}
   int maxGpuFramesInFlight = 1;
 
+  /// Whether shadow-casting spot and point lights keep their own
+  /// `shadowMapResolution` next to the directional light's cascades.
+  ///
+  /// The shared shadow atlas otherwise gives every tile the cascades'
+  /// resolution, so two point lights beside 2048 cascades cost four 2048
+  /// tiles. With this on, a light asking for less (a spot's tile edge, twice
+  /// a point light's face edge) renders its tiles at that size, stacked in
+  /// columns after the cascades, as long as it divides the cascade tile edge
+  /// by a power of two (the first caster's size serves them all, as without
+  /// cascades). Off by default: it changes the spot and point shadows' texel
+  /// size in scenes that mix them with a directional shadow.
+  /// {@category Rendering}
+  bool punctualShadowsAtOwnResolution = false;
+
+  // The spot and point shadow tile edge resolved for the frame being
+  // rendered (see punctualShadowsAtOwnResolution).
+  int _punctualTileResolution = 1024;
+  int _frameShadowTileResolution = 1024;
+  bool get _punctualTileScaled =>
+      _punctualTileResolution != _frameShadowTileResolution;
+
   // The frame's shared spot and point shadow tiles while render() runs.
   SharedShadowAtlas? _sharedShadowAtlas;
   RenderView? _sharedShadowAnchor;
@@ -2364,13 +2385,22 @@ base class Scene implements SceneGraph {
     // atlas to stop being one uniform strip, at which point
     // PointLight.shadowMapResolution and SpotLight.shadowMapResolution can
     // mean what they say for every light rather than only the first caster.
+    final ownPunctualResolution =
+        spotShadowFrame?.tileResolution ??
+        (pointShadowFrame == null
+            ? 1024
+            : pointShadowFrame.casters.first.light.shadowMapResolution * 2);
     final shadowTileResolution = lightComponent?.light.castsShadow == true
         ? lightComponent!.light.shadowMapResolution
-        : spotShadowFrame?.tileResolution ??
-              (pointShadowFrame == null
-                  ? 1024
-                  : pointShadowFrame.casters.first.light.shadowMapResolution *
-                        2);
+        : ownPunctualResolution;
+    final punctualTileResolution = punctualShadowsAtOwnResolution
+        ? punctualShadowTileResolution(
+            shadowTileResolution,
+            ownPunctualResolution,
+          )
+        : shadowTileResolution;
+    _punctualTileResolution = punctualTileResolution;
+    _frameShadowTileResolution = shadowTileResolution;
 
     // Without directional cascades the atlas holds only spot and point tiles,
     // so the texture views and the first screen view share one render of it,
@@ -2419,7 +2449,10 @@ base class Scene implements SceneGraph {
       bvh: renderScene.bvh,
       spotShadows: spotShadowFrame,
       pointShadows: pointShadowFrame,
-      pointFaceResolution: shadowTileResolution ~/ 2,
+      pointFaceResolution: punctualTileResolution ~/ 2,
+      shadowTileScale: punctualTileResolution == shadowTileResolution
+          ? 0.0
+          : punctualTileResolution / shadowTileResolution,
       enableFroxels: punctualLightClustering,
     );
 
@@ -3488,7 +3521,9 @@ base class Scene implements SceneGraph {
           renderScene: renderScene,
           cascades: effectiveCascades,
           cascadeReceiverPlanes: cascadeReceiverPlanes,
-          tileResolution: cascades.isNotEmpty
+          tileResolution: _punctualTileScaled
+              ? _frameShadowTileResolution
+              : cascades.isNotEmpty
               ? light!.shadowMapResolution
               : spotShadowFrame?.tileResolution ??
                     pointShadowFrame!.casters.first.light.shadowMapResolution *
@@ -3499,6 +3534,11 @@ base class Scene implements SceneGraph {
           casterChannelMask: cascades.isNotEmpty
               ? light!.shadowCasterChannelMask
               : 0xFF,
+          // With smaller spot and point tiles the layout follows the frame's
+          // resolutions (the lit shader's tile scale), cascades or not.
+          punctualTileResolution: _punctualTileScaled
+              ? _punctualTileResolution
+              : null,
           siteShadow: cascades.isNotEmpty && light!.shadowSiteBounds != null,
           siteMinCasterSize: light?.shadowSiteMinCasterSize ?? 0.0,
           cameraPosition: camera.position,

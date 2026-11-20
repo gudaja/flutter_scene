@@ -5,6 +5,7 @@ import 'package:vector_math/vector_math.dart';
 
 import 'package:flutter_scene/src/gpu/render_pass_compat.dart';
 import 'package:flutter_scene/src/light.dart';
+import 'package:flutter_scene/src/material/material.dart' show Material;
 import 'package:flutter_scene/src/render/point_shadow.dart';
 import 'package:flutter_scene/src/render/render_graph.dart';
 import 'package:flutter_scene/src/render/render_scene.dart';
@@ -36,7 +37,8 @@ class SpotShadowInfo {
     required this.firstTile,
     required this.totalTiles,
     required this.tileResolution,
-  });
+    int? lampTileResolution,
+  }) : lampTileResolution = lampTileResolution ?? tileResolution;
 
   /// World to clip matrix of each casting spot, in shadow slot order.
   final List<Matrix4> matrices;
@@ -49,6 +51,26 @@ class SpotShadowInfo {
 
   /// Edge length of a tile in texels.
   final int tileResolution;
+
+  /// Edge length of a spot or point tile in texels. Smaller than
+  /// [tileResolution] when the lights render at their own resolution
+  /// (`Scene.punctualShadowsAtOwnResolution`); such tiles stack
+  /// `tileResolution ~/ lampTileResolution` to a column after the cascades,
+  /// and [totalTiles] still counts the cascades plus the spot and point tiles.
+  final int lampTileResolution;
+}
+
+/// The spot and point shadow tile edge to use beside cascade tiles of
+/// [cascadeResolution] when the lights ask for [ownResolution]: the light's
+/// own when it is smaller and divides the cascade edge by a power of two (so
+/// the tiles stack in whole columns), else the cascade edge.
+int punctualShadowTileResolution(int cascadeResolution, int ownResolution) {
+  if (ownResolution <= 0 || ownResolution >= cascadeResolution) {
+    return cascadeResolution;
+  }
+  if (cascadeResolution % ownResolution != 0) return cascadeResolution;
+  final ratio = cascadeResolution ~/ ownResolution;
+  return ratio & (ratio - 1) == 0 ? ownResolution : cascadeResolution;
 }
 
 /// Forces a site shadow map (WR-77) through the per-frame atlas composite
@@ -60,6 +82,10 @@ bool debugDisableSiteShadowTilePublish = false;
 /// 2 = the five probe taps only (no penumbra kernel); 3 = one center tap.
 /// Modes 1-3 change the image and exist only to split the per-pixel cost.
 int debugShadowSamplingMode = 0;
+
+/// Allocates and renders the shadow atlas even when no caster would draw into
+/// it, so parity tests can render both against the placeholder (WR-88b).
+bool debugAlwaysAllocateShadowAtlas = false;
 
 /// Forces every view to render its own spot and point shadow tiles, so
 /// parity tests can render the same frame with and without sharing.
@@ -128,7 +154,9 @@ class ShadowPass extends RenderGraphPass {
     SharedShadowAtlas? shared,
     bool siteShadow = false,
     double siteMinCasterSize = 0.0,
+    int? punctualTileResolution,
   }) : assert(shared == null || cascades.isEmpty),
+       _punctualTileResolution = punctualTileResolution ?? tileResolution,
        _siteShadow = siteShadow,
        _siteMinCasterSize = siteShadow ? siteMinCasterSize : 0.0,
        _renderScene = renderScene,
@@ -162,6 +190,10 @@ class ShadowPass extends RenderGraphPass {
       ? _cascadeReceiverPlanes[cascade]
       : const [];
   final int _tileResolution;
+
+  // Edge of a spot or point tile; below [_tileResolution] they stack in
+  // columns after the cascades (Scene.punctualShadowsAtOwnResolution).
+  final int _punctualTileResolution;
   final ShadowCasterFaces _casterFaces;
 
   // The directional light's shadow-caster channels. Applies to the cascade
@@ -221,12 +253,34 @@ class ShadowPass extends RenderGraphPass {
     }
     final deferredBefore = deferredPipelineBuilds;
     final plan = _cachePlan;
+    final spotCount = _spotShadows?.matrices.length ?? 0;
+    final pointCount = _pointShadows?.casters.length ?? 0;
+    // No caster at all: every texel of the atlas would hold the clear value
+    // (lit), which a white placeholder reads the same, so neither the atlas
+    // nor the cached tiles are allocated. The tiles a plan asked to refresh
+    // render once a caster appears.
+    if (spotCount == 0 &&
+        pointCount == 0 &&
+        !debugAlwaysAllocateShadowAtlas &&
+        !_hasCascadeCasters()) {
+      if (plan != null) {
+        for (final refresh in plan.refreshes) {
+          refresh.entry.hasContent = false;
+        }
+      }
+      context.blackboard.set(
+        kShadowMapBlackboardKey,
+        Material.whitePlaceholder(null),
+      );
+      final shadowUniform = _shadowUniform;
+      if (shadowUniform != null) {
+        context.blackboard.set(kShadowUniformBlackboardKey, shadowUniform);
+      }
+      return;
+    }
     if (plan != null) {
       _renderStaticTiles(context, plan);
     }
-
-    final spotCount = _spotShadows?.matrices.length ?? 0;
-    final pointCount = _pointShadows?.casters.length ?? 0;
     // WR-77: a site shadow map with no dynamic caster, spot, or point tile is
     // exactly its one cached tile, so that tile is published as the atlas:
     // no per-frame clear or tile copy (it re-renders only when the sun turns
@@ -245,39 +299,55 @@ class ShadowPass extends RenderGraphPass {
       }
       return;
     }
-    final totalTiles =
-        _cascades.length + spotCount + pointCount * kPointShadowTilesPerLight;
-    final atlasWidth = _tileResolution * totalTiles;
+    final lampTiles = spotCount + pointCount * kPointShadowTilesPerLight;
+    final totalTiles = _cascades.length + lampTiles;
+    final lampResolution = _punctualTileResolution;
+    final lampsPerColumn = _tileResolution ~/ lampResolution;
+    final lampColumns = (lampTiles + lampsPerColumn - 1) ~/ lampsPerColumn;
+    final atlasWidth =
+        _tileResolution * _cascades.length + lampResolution * lampColumns;
+    // Cached cascades without a dynamic caster, and no spot or point tile,
+    // only replay their tiles, which needs no depth: the atlas then renders
+    // without an atlas-sized depth attachment.
+    final dynamicCasters = plan != null && _hasDynamicCascadeCasters();
+    final needsDepth = plan == null || dynamicCasters || lampTiles > 0;
+    // The atlas does not follow the output size, so it lives in the view's
+    // size-independent pool: a render scale that toggles keeps one copy.
+    final pool = context.texturePool.sizeIndependent;
     // fp32 (not fp16): the far cascade's orthographic depth range spans
     // hundreds of world units, and fp16's ~11-bit mantissa quantizes
     // window-space depth into steps coarser than the shadow depth bias.
     // That made the flat distant ground self-shadow in moire bands.
-    final color = context.texturePool.acquire(
+    final color = pool.acquire(
       TransientTextureDescriptor.color(
         width: atlasWidth,
         height: _tileResolution,
         format: gpu.PixelFormat.r32Float,
         debugName: 'directional_shadow_map',
+        // Backends cache a framebuffer per color texture, so the copy-only
+        // atlas keeps its own texture.
+        attachmentKey: needsDepth ? null : 'no_depth',
       ),
     );
-    final depth = context.texturePool.acquire(
-      TransientTextureDescriptor.depth(
-        width: atlasWidth,
-        height: _tileResolution,
-        format: gpu.gpuContext.defaultDepthStencilFormat,
-        debugName: 'directional_shadow_map_depth',
-      ),
-    );
+    final depth = needsDepth
+        ? pool.acquire(
+            TransientTextureDescriptor.depth(
+              width: atlasWidth,
+              height: _tileResolution,
+              format: gpu.gpuContext.defaultDepthStencilFormat,
+              debugName: 'directional_shadow_map_depth',
+            ),
+          )
+        : null;
     final target = gpu.RenderTarget.singleColor(
       gpu.ColorAttachment(
         texture: color,
         // White = depth 1.0 in .r => fragments no caster covers are lit.
         clearValue: Vector4(1.0, 1.0, 1.0, 1.0),
       ),
-      depthStencilAttachment: gpu.DepthStencilAttachment(
-        texture: depth,
-        depthClearValue: 1.0,
-      ),
+      depthStencilAttachment: depth == null
+          ? null
+          : gpu.DepthStencilAttachment(texture: depth, depthClearValue: 1.0),
     );
     final commandBuffer = gpu.gpuContext.createCommandBuffer();
     final renderPass = commandBuffer.createRenderPass(target);
@@ -286,7 +356,7 @@ class ShadowPass extends RenderGraphPass {
     // rasterization to the tile; the shared depth attachment is cleared once for
     // the whole atlas. Renders a tile from a light-space matrix.
     void renderTile(
-      int tile,
+      gpu.Viewport viewport,
       Matrix4 matrix,
       ShadowCasterFaces faces, {
       ShadowCasterFilter filter = ShadowCasterFilter.all,
@@ -294,14 +364,7 @@ class ShadowPass extends RenderGraphPass {
       List<Plane> receiverPlanes = const [],
       bool siteBias = false,
     }) {
-      renderPass.setViewport(
-        gpu.Viewport(
-          x: tile * _tileResolution,
-          y: 0,
-          width: _tileResolution,
-          height: _tileResolution,
-        ),
-      );
+      renderPass.setViewport(viewport);
       final encoder = ShadowEncoder(
         renderPass,
         context.transientsBuffer,
@@ -331,7 +394,14 @@ class ShadowPass extends RenderGraphPass {
     // one flag check per item (the encoder still frustum-culls each caster).
     for (var c = 0; c < _cascades.length; c++) {
       if (plan != null) {
-        _encodeTileCopy(renderPass, c, plan.entries[c].tile!);
+        _encodeTileCopy(
+          renderPass,
+          c,
+          plan.entries[c].tile!,
+          writeDepth: needsDepth,
+        );
+        // Without a dynamic caster the composite draws nothing more.
+        if (!dynamicCasters) continue;
         renderPass.setViewport(
           gpu.Viewport(
             x: c * _tileResolution,
@@ -358,7 +428,12 @@ class ShadowPass extends RenderGraphPass {
         encoder.flush();
       } else {
         renderTile(
-          c,
+          gpu.Viewport(
+            x: c * _tileResolution,
+            y: 0,
+            width: _tileResolution,
+            height: _tileResolution,
+          ),
           _cascades[c].lightSpaceMatrix,
           _casterFaces,
           casterChannelMask: _casterChannelMask,
@@ -367,11 +442,22 @@ class ShadowPass extends RenderGraphPass {
         );
       }
     }
+    // Spot and point tiles follow the cascades, `lampsPerColumn` to a column
+    // of `lampResolution` (one per column when they match the cascades).
+    final lampOriginX = _tileResolution * _cascades.length;
+    int lampX(int slot) =>
+        lampOriginX + (slot ~/ lampsPerColumn) * lampResolution;
+    int lampY(int slot) => (slot % lampsPerColumn) * lampResolution;
     final spots = _spotShadows;
     if (spots != null) {
       for (var s = 0; s < spots.matrices.length; s++) {
         renderTile(
-          _cascades.length + s,
+          gpu.Viewport(
+            x: lampX(s),
+            y: lampY(s),
+            width: lampResolution,
+            height: lampResolution,
+          ),
           spots.matrices[s],
           spots.casterFaces,
           casterChannelMask: spots.casterChannelMasks[s],
@@ -384,16 +470,15 @@ class ShadowPass extends RenderGraphPass {
       // tiles at half the tile edge, so a point light costs two atlas tiles
       // rather than six. The quadrant placement must stay in lockstep with the
       // shader's face -> atlas mapping (SamplePointShadow).
-      final half = _tileResolution ~/ 2;
-      final firstPointTile = _cascades.length + spotCount;
+      final half = lampResolution ~/ 2;
       for (var s = 0; s < pointFrame.casters.length; s++) {
         for (var f = 0; f < kPointShadowFaces; f++) {
-          final tile = firstPointTile + s * kPointShadowTilesPerLight + f ~/ 4;
+          final slot = spotCount + s * kPointShadowTilesPerLight + f ~/ 4;
           final q = f % 4;
           renderPass.setViewport(
             gpu.Viewport(
-              x: tile * _tileResolution + (q & 1) * half,
-              y: (q >> 1) * half,
+              x: lampX(slot) + (q & 1) * half,
+              y: lampY(slot) + (q >> 1) * half,
               width: half,
               height: half,
             ),
@@ -422,6 +507,7 @@ class ShadowPass extends RenderGraphPass {
         firstTile: _cascades.length,
         totalTiles: totalTiles,
         tileResolution: _tileResolution,
+        lampTileResolution: lampResolution,
       );
       context.blackboard.set(kSpotShadowInfoBlackboardKey, spotInfo);
     }
@@ -496,6 +582,22 @@ class ShadowPass extends RenderGraphPass {
     }
   }
 
+  /// Whether any item would draw as a caster, static or dynamic, into a
+  /// cascade tile (the view-independent test).
+  bool _hasCascadeCasters() {
+    if (_cascades.isEmpty) return false;
+    for (final item in _renderScene.items) {
+      if (shadowCasterAccepted(
+        item,
+        ShadowCasterFilter.all,
+        _casterChannelMask,
+      )) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Whether any item would draw as a dynamic caster into a cascade tile
   /// (the view-independent test; culling only removes more).
   bool _hasDynamicCascadeCasters() {
@@ -514,7 +616,12 @@ class ShadowPass extends RenderGraphPass {
   /// Replays cascade [tile]'s cached static content into its atlas slot,
   /// writing the stored depth to both the color channel and the fragment
   /// depth so the dynamic casters drawn after depth-test against it.
-  void _encodeTileCopy(gpu.RenderPass pass, int tile, gpu.Texture source) {
+  void _encodeTileCopy(
+    gpu.RenderPass pass,
+    int tile,
+    gpu.Texture source, {
+    bool writeDepth = true,
+  }) {
     pass.setViewport(
       gpu.Viewport(
         x: tile * _tileResolution,
@@ -528,7 +635,7 @@ class ShadowPass extends RenderGraphPass {
     pass.bindPipeline(pipeline);
     pass.setColorBlendEnable(false);
     pass.setCullMode(gpu.CullMode.none);
-    pass.setDepthWriteEnable(true);
+    pass.setDepthWriteEnable(writeDepth);
     pass.setDepthCompareOperation(gpu.CompareFunction.always);
     bindVertexBufferCompat(pass, _quadView, 6);
     pass.bindTexture(

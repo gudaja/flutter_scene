@@ -165,6 +165,35 @@ vec2 FixedShadowTap(int i) {
   return vec2(float(i - 14) - 1.0, 1.0);
 }
 
+// The spot and point shadow tiles' edge in cascade-tile units: 1 when every
+// atlas tile is one size, less when they render at their own resolution
+// (camera_position.w, see ShadowPass). Smaller tiles stack in columns of
+// 1 / scale after the cascades.
+highp float LampTileScale() {
+  return frag_info.camera_position.w > 0.0 ? frag_info.camera_position.w : 1.0;
+}
+
+// Width of the spot and point tile columns, in cascade-tile units, so the
+// atlas spans shadow_cascade_count + LampTilesWidth() tiles. With one tile
+// size this is the tile count itself.
+highp float LampTilesWidth() {
+  highp float s = LampTileScale();
+  return ceil(frag_info.spot_shadow_params.x * s - 0.001) * s;
+}
+
+// Atlas UV of `tile_uv` (in-tile, V up) in spot/point tile `slot` (counted
+// after the cascades). With one tile size this is exactly the strip mapping
+// ((cascades + slot + u) / total, 1 - v).
+highp vec2 LampTileUv(highp float slot, highp vec2 tile_uv, highp float total) {
+  highp float s = LampTileScale();
+  highp float per_column = floor(1.0 / s + 0.5);
+  highp float column = floor(slot / per_column);
+  highp float row = slot - column * per_column;
+  highp float tile_x = frag_info.shadow_cascade_count + column * s;
+  return vec2((tile_x + tile_uv.x * s) / total,
+              row * s + (1.0 - tile_uv.y) * s);
+}
+
 // Samples one cascade's tile of the shadow atlas strip. `proj` is the
 // normal-biased receiver projected into the cascade (NDC xy, depth z).
 float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
@@ -178,7 +207,7 @@ float SampleCascade(int cascade, int count, highp vec3 proj, highp float box) {
 
   // The atlas also holds spot-shadow tiles after the cascades, so normalize the
   // atlas-x by the total tile count. Spot count 0 leaves this at 1 / cascades.
-  highp float inv_count = 1.0 / (float(count) + frag_info.spot_shadow_params.x);
+  highp float inv_count = 1.0 / (float(count) + LampTilesWidth());
 
   // Select the tap positions without duplicating the texture samples in both
   // branches. Duplicating both kernels here expands to 33 samples per cascade
@@ -477,8 +506,7 @@ highp vec2 PunctualLightSlice() {
 // bleed once it stays in-tile).
 float SpotShadowTap(highp vec2 uv, highp float tile, highp float total,
                     highp float receiver) {
-  highp vec2 atlas_uv = vec2((tile + clamp(uv.x, 0.0, 1.0)) / total,
-                       1.0 - clamp(uv.y, 0.0, 1.0));
+  highp vec2 atlas_uv = LampTileUv(tile, clamp(uv, 0.0, 1.0), total);
   return receiver <= textureLod(shadow_map, atlas_uv, 0.0).r ? 1.0 : 0.0;
 }
 
@@ -505,8 +533,8 @@ float SampleSpotShadow(int light_row, int slot, highp vec3 world_pos,
       proj.z > 1.0) {
     return 1.0;
   }
-  highp float total = frag_info.shadow_cascade_count + frag_info.spot_shadow_params.x;
-  highp float tile = frag_info.shadow_cascade_count + float(slot);
+  highp float total = frag_info.shadow_cascade_count + LampTilesWidth();
+  highp float tile = float(slot);
   highp float receiver = proj.z - frag_info.spot_shadow_params.y;
   // Penumbra radius in tile-UV (resolution-independent). softness 0 = hard.
   highp float radius = frag_info.spot_shadow_params.w * 0.004;
@@ -549,7 +577,7 @@ float PointShadowTap(highp vec2 uv, highp float tile, highp float qx,
                      highp float receiver) {
   highp vec2 cuv = clamp(uv, vec2(half_texel), vec2(1.0 - half_texel));
   highp vec2 tile_uv = vec2(qx, 1.0 - qy) * 0.5 + cuv * 0.5;
-  highp vec2 atlas_uv = vec2((tile + tile_uv.x) / total, 1.0 - tile_uv.y);
+  highp vec2 atlas_uv = LampTileUv(tile, tile_uv, total);
   return receiver <= textureLod(shadow_map, atlas_uv, 0.0).r ? 1.0 : 0.0;
 }
 
@@ -592,9 +620,8 @@ float SamplePointShadow(int light_row, highp float base_tile,
   if (receiver < 0.0 || receiver > 1.0) {
     return 1.0;
   }
-  highp float total = frag_info.shadow_cascade_count + frag_info.spot_shadow_params.x;
-  highp float tile = frag_info.shadow_cascade_count + base_tile +
-               (face >= 4.0 ? 1.0 : 0.0);
+  highp float total = frag_info.shadow_cascade_count + LampTilesWidth();
+  highp float tile = base_tile + (face >= 4.0 ? 1.0 : 0.0);
   highp float q = face >= 4.0 ? face - 4.0 : face;
   highp float qx = mod(q, 2.0);
   highp float qy = floor(q * 0.5);

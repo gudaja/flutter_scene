@@ -1182,6 +1182,7 @@ class Lighting {
     this.spotShadowDepthBias = 0.0,
     this.spotShadowNormalBias = 0.0,
     this.spotShadowSoftness = 0.0,
+    this.punctualShadowTileScale = 0.0,
     this.shadowMap,
     this.cascades = const [],
     this.ssaoMap,
@@ -1326,6 +1327,11 @@ class Lighting {
   final double spotShadowDepthBias;
   final double spotShadowNormalBias;
   final double spotShadowSoftness;
+
+  /// The spot and point shadow tiles' edge over the cascade tile edge when
+  /// they render at their own smaller resolution, or 0 when every atlas tile
+  /// is one size (see [PunctualLighting.shadowTileScale]).
+  final double punctualShadowTileScale;
 
   /// The cascaded shadow map atlas (a depth-in-`.r` texture holding the
   /// cascade tiles as a horizontal strip) for [directionalLight], or

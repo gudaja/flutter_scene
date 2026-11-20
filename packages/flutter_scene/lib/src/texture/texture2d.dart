@@ -312,6 +312,21 @@ class Texture2D implements TextureSource {
     sampling.toSamplerOptions(),
   );
 
+  /// Loads the standard KTX2 asset at [assetPath] and uploads it as
+  /// [fromKtx2Bytes] does.
+  static Future<Texture2D> fromKtx2Asset(
+    String assetPath, {
+    TextureContent content = TextureContent.color,
+    TextureSampling sampling = const TextureSampling(),
+    AssetBundle? bundle,
+    int? maxSize,
+  }) async => fromKtx2Bytes(
+    await bytesFromAsset(assetPath, bundle: bundle),
+    content: content,
+    sampling: sampling,
+    maxSize: maxSize,
+  );
+
   /// Loads, decodes, and uploads the image asset at [assetPath], as
   /// [fromEncodedBytes] does.
   static Future<Texture2D> fromAsset(

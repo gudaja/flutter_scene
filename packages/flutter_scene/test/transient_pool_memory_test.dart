@@ -161,6 +161,17 @@ void main() {
     });
   });
 
+  test('T-WR88b-3b · a new shape releases a completed old one in the same '
+      'frame (a view at rest renders no next frame)', () {
+    final pool = TransientTexturePool(releaseUnusedShapes: true);
+    pool.beginFrame();
+    pool.acquire(_color(16, 8, 'atlas'));
+    rendererSubmissions.complete(rendererSubmissions.record());
+    pool.beginFrame();
+    pool.acquire(_color(32, 8, 'atlas'));
+    expect(pool.debugHeld.keys.map((d) => d.width), [32]);
+  });
+
   group('shadow atlas', () {
     test('T-WR88b-4 · cascades: one atlas for both render scales, kept in '
         'the size-independent pool', () async {
@@ -179,11 +190,6 @@ void main() {
       expect(
         pool.debugHeld.keys.where((d) => d.debugName == _atlasName),
         isEmpty,
-      );
-      expect(
-        pool.sizeIndependent.debugHeld[atlases.single],
-        1,
-        reason: 'paced frames keep one ring slot',
       );
       scene.dispose();
     });

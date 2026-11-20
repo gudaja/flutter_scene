@@ -370,13 +370,31 @@ class TransientTexturePool {
     });
   }
 
+  void _releaseSuperseded(TransientTextureDescriptor current) {
+    final done = rendererSubmissions.completedThrough;
+    _rings.removeWhere((descriptor, ring) {
+      if (descriptor == current ||
+          descriptor.debugName != current.debugName ||
+          ring.lastUsedFrame == _frameCount ||
+          ring.stamp > done) {
+        return false;
+      }
+      ring.releaseAll();
+      return true;
+    });
+  }
+
   /// Returns a texture matching [descriptor] from the pool for the
   /// current frame, allocating it on first use.
   gpu.Texture acquire(TransientTextureDescriptor descriptor) {
-    final ring = _rings.putIfAbsent(
-      descriptor,
-      () => _PoolRing(framesInFlight),
-    );
+    var ring = _rings[descriptor];
+    if (ring == null) {
+      ring = _rings[descriptor] = _PoolRing(framesInFlight);
+      // A new shape supersedes the others under its name. Release those whose
+      // last frame already completed now: a view at rest may render no
+      // further frame for beginFrame to do it.
+      if (releaseUnusedShapes) _releaseSuperseded(descriptor);
+    }
     ring.lastUsedFrame = _frameCount;
     var texture = ring.textures[_frame];
     if (texture == null) {

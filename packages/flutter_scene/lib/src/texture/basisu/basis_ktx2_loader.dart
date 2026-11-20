@@ -8,6 +8,8 @@
 // TODO(uastc-bc7-transcode): a BC7 repack would give BC-only desktops the
 // same compressed path for UASTC; they fall back to rgba8 today.
 
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 import 'package:flutter_scene/src/gpu/gpu.dart' as gpu;
@@ -100,15 +102,18 @@ typedef StandardKtx2Decoded = ({
 
 /// Decodes a batch of standard KTX2 files off the main isolate and uploads
 /// each to a GPU texture. A file that fails to decode yields null alongside a
-/// debug message, so one bad texture cannot sink an import.
+/// debug message, so one bad texture cannot sink an import. [maxSize] caps
+/// the longest side by skipping the file's larger stored mip levels.
 Future<List<Texture2D?>> loadStandardKtx2Batch(
-  List<StandardKtx2Request> requests,
-) async {
+  List<StandardKtx2Request> requests, {
+  int? maxSize,
+}) async {
   if (requests.isEmpty) return const [];
   final decoded = await compute(_decodeBatch, (
     requests: requests,
     mips: uploadableMipChains,
     support: currentCompressionSupport(),
+    maxSize: maxSize,
   ));
   final out = <Texture2D?>[];
   for (final result in decoded) {
@@ -157,7 +162,12 @@ gpu.Texture uploadStandardKtx2(StandardKtx2Decoded decoded) {
 
 /// Isolate entry point for [loadStandardKtx2Batch].
 List<StandardKtx2Decoded> _decodeBatch(
-  ({List<StandardKtx2Request> requests, bool mips, CompressionSupport support})
+  ({
+    List<StandardKtx2Request> requests,
+    bool mips,
+    CompressionSupport support,
+    int? maxSize,
+  })
   input,
 ) => [
   for (final request in input.requests)
@@ -165,29 +175,36 @@ List<StandardKtx2Decoded> _decodeBatch(
       request,
       mips: input.mips,
       support: input.support,
+      maxSize: input.maxSize,
     ),
 ];
 
 /// Decodes one standard KTX2 file for a device with [support]: its stored
-/// chain when [mips], else the base level. Pure Dart; returns errors rather
-/// than throwing.
+/// chain when [mips], else the base level. [maxSize] caps the longest side
+/// by starting at the first stored level that fits ([ktx2LevelsAbove]). Pure
+/// Dart; returns errors rather than throwing.
 StandardKtx2Decoded decodeStandardKtx2ForUpload(
   StandardKtx2Request request, {
   required bool mips,
   required CompressionSupport support,
+  int? maxSize,
 }) {
   try {
     final texture = readKtx2(request.bytes);
     final format = readDataFormat(texture);
-    final width = texture.pixelWidth;
-    final height = texture.pixelHeight == 0 ? 1 : texture.pixelHeight;
+    final first = ktx2LevelsAbove(texture, maxSize);
+    final width = math.max(1, texture.pixelWidth >> first);
+    final height = math.max(
+      1,
+      (texture.pixelHeight == 0 ? 1 : texture.pixelHeight) >> first,
+    );
     final maxLevels = mips ? engineMipLevelCount(width, height) : 1;
     final upload = chooseStandardKtx2Upload(
       colorModel: format.colorModel,
       hasAlpha: format.hasAlpha,
       width: width,
       height: height,
-      storedLevels: texture.levels.length,
+      storedLevels: texture.levels.length - first,
       mips: mips,
       support: support,
     );
@@ -196,26 +213,31 @@ StandardKtx2Decoded decodeStandardKtx2ForUpload(
       StandardKtx2Upload.astc4x4 => repackStandardKtx2ToAstc(
         texture,
         maxLevels,
+        firstLevel: first,
       ),
       StandardKtx2Upload.etc2Rgb => transcodeStandardKtx2Etc1s(
         texture,
         Etc1sTarget.etc1,
         maxLevels,
+        firstLevel: first,
       ),
       StandardKtx2Upload.etc2Rgba => transcodeStandardKtx2Etc1s(
         texture,
         Etc1sTarget.etc2Rgba,
         maxLevels,
+        firstLevel: first,
       ),
       StandardKtx2Upload.bc1 => transcodeStandardKtx2Etc1s(
         texture,
         Etc1sTarget.bc1,
         maxLevels,
+        firstLevel: first,
       ),
       StandardKtx2Upload.bc3 => transcodeStandardKtx2Etc1s(
         texture,
         Etc1sTarget.bc3,
         maxLevels,
+        firstLevel: first,
       ),
     };
     if (blocks != null) {
@@ -228,7 +250,7 @@ StandardKtx2Decoded decodeStandardKtx2ForUpload(
         ],
       );
     }
-    final image = decodeStandardKtx2(texture);
+    final image = decodeStandardKtx2(texture, firstLevel: first);
     var levels = image.levels;
     if (!mips) {
       levels = [levels.first];
@@ -255,12 +277,14 @@ StandardKtx2Decoded decodeStandardKtx2ForUpload(
 Future<gpu.Texture> gpuTextureFromAnyKtx2Async(
   Uint8List bytes, {
   TextureContent content = TextureContent.color,
+  int? maxSize,
 }) async {
   if (isInternalKtx2(readKtx2(bytes))) return gpuTextureFromKtx2Async(bytes);
   final decoded = await compute(_decodeBatch, (
     requests: [(bytes: bytes, content: content)],
     mips: uploadableMipChains,
     support: currentCompressionSupport(),
+    maxSize: maxSize,
   ));
   final result = decoded.single;
   if (result.error != null) {

@@ -209,4 +209,77 @@ void main() {
       expect(decoded.levels, isEmpty);
     });
   });
+  group('size cap (maxSize)', () {
+    StandardKtx2Decoded capped(
+      String name,
+      int? maxSize, {
+      required CompressionSupport support,
+    }) => decodeStandardKtx2ForUpload(
+      (bytes: _fixture('$name.ktx2'), content: TextureContent.color),
+      mips: true,
+      support: support,
+      maxSize: maxSize,
+    );
+
+    /// [golden]'s bytes from the start of [skipped]'s levels on.
+    Uint8List goldenFrom(String golden, List<int> skipped, int bytesPerPx16) {
+      final bytes = _fixture(golden);
+      final start = skipped.fold<int>(
+        0,
+        (n, s) => n + s * s * bytesPerPx16 ~/ 16,
+      );
+      return Uint8List.sublistView(bytes, start);
+    }
+
+    test('UASTC skips the stored levels above the cap', () {
+      final decoded = capped('uastc_srgb_mips_zstd_64', 16, support: _mobile);
+      expect(decoded.error, isNull);
+      expect(decoded.upload, StandardKtx2Upload.astc4x4);
+      expect([for (final l in decoded.levels) l.width], [16, 8, 4, 2]);
+      final rest = goldenFrom('uastc_srgb_mips_zstd_64.astc', [64, 32], 16);
+      expect(
+        _concat(decoded.levels),
+        Uint8List.sublistView(rest, 0, _concat(decoded.levels).length),
+      );
+    });
+
+    test('ETC1S skips the stored levels above the cap', () {
+      final decoded = capped('etc1s_srgb_mips_64', 32, support: _mobile);
+      expect(decoded.upload, StandardKtx2Upload.etc2Rgb);
+      expect([for (final l in decoded.levels) l.width], [32, 16, 8, 4, 2]);
+      final rest = goldenFrom('etc1s_srgb_mips_64.etc1', [64], 8);
+      expect(
+        _concat(decoded.levels),
+        Uint8List.sublistView(rest, 0, _concat(decoded.levels).length),
+      );
+    });
+
+    test('the rgba8 fallback skips the same levels', () {
+      final decoded = capped('etc1s_srgb_mips_64', 32, support: _none);
+      expect(decoded.upload, StandardKtx2Upload.rgba8);
+      expect(decoded.levels.first.width, 32);
+      final rest = goldenFrom('etc1s_srgb_mips_64.rgba', [64], 64);
+      expect(
+        decoded.levels.first.pixels,
+        Uint8List.sublistView(rest, 0, 32 * 32 * 4),
+      );
+    });
+
+    test('no cap, or a cap at or above the base, keeps every level', () {
+      for (final cap in [null, 64, 4096]) {
+        final decoded = capped(
+          'uastc_srgb_mips_zstd_64',
+          cap,
+          support: _mobile,
+        );
+        expect(decoded.levels.first.width, 64, reason: 'cap $cap');
+      }
+    });
+
+    test('a base-only file larger than the cap loads at its stored size', () {
+      final decoded = capped('etc1s_alpha_srgb_32', 8, support: _mobile);
+      expect(decoded.error, isNull);
+      expect(decoded.levels.first.width, 32);
+    });
+  });
 }

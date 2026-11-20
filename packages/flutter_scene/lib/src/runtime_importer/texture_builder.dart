@@ -133,7 +133,10 @@ Future<List<Texture2D>> buildTextures(
   }
 
   if (standardRequests.isNotEmpty) {
-    final decoded = await loadStandardKtx2Batch(standardRequests);
+    final decoded = await loadStandardKtx2Batch(
+      standardRequests,
+      maxSize: maxTextureSize,
+    );
     for (int j = 0; j < standardIndices.length; j++) {
       results[standardIndices[j]] = decoded[j];
     }

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../asset_helpers.dart';
 import '../gpu/gpu.dart' as gpu;
 import '../render/mip_sampling_probe.dart';
+import 'basisu/basis_ktx2_loader.dart' show gpuTextureFromAnyKtx2Async;
 import 'encoded_image.dart';
 import 'mip_upload_web.dart' if (dart.library.io) 'mip_upload_native.dart';
 import 'mipmap.dart';
@@ -292,6 +293,24 @@ class Texture2D implements TextureSource {
       image.dispose();
     }
   }
+
+  /// Uploads a standard KTX2 file from [bytes] (Basis Universal UASTC or
+  /// ETC1S, or plain RGBA8, as glTF `KHR_texture_basisu` carries): block
+  /// compressed where the device samples the payload's family (UASTC to ASTC
+  /// 4x4, ETC1S to BC or ETC2), otherwise decoded to rgba8. The transcode runs
+  /// off the main isolate and the file's own mip chain is uploaded. [maxSize]
+  /// caps the longest side by skipping the file's larger stored levels (no
+  /// resampling; a base-only file loads at its stored size). Throws a
+  /// [Ktx2FormatException] when the file cannot be decoded.
+  static Future<Texture2D> fromKtx2Bytes(
+    Uint8List bytes, {
+    TextureContent content = TextureContent.color,
+    TextureSampling sampling = const TextureSampling(),
+    int? maxSize,
+  }) async => Texture2D._(
+    await gpuTextureFromAnyKtx2Async(bytes, content: content, maxSize: maxSize),
+    sampling.toSamplerOptions(),
+  );
 
   /// Loads, decodes, and uploads the image asset at [assetPath], as
   /// [fromEncodedBytes] does.

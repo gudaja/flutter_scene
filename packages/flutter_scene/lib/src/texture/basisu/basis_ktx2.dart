@@ -84,13 +84,18 @@ typedef BlockLevel = ({int width, int height, Uint8List blocks});
 
 /// Repacks the stored mip levels of a UASTC [texture] into ASTC 4x4 blocks
 /// (the direct compressed upload path), or returns null when [texture] does
-/// not carry UASTC. At most [maxLevels] levels are produced.
-List<BlockLevel>? repackStandardKtx2ToAstc(Ktx2Texture texture, int maxLevels) {
+/// not carry UASTC. At most [maxLevels] levels are produced, starting at the
+/// stored level [firstLevel] (a size cap skips the larger levels).
+List<BlockLevel>? repackStandardKtx2ToAstc(
+  Ktx2Texture texture,
+  int maxLevels, {
+  int firstLevel = 0,
+}) {
   final (:width, :height) = _checkStandard2d(texture);
   if (readDataFormat(texture).colorModel != kDfModelUastc) return null;
   final levels = <BlockLevel>[];
-  final count = math.min(texture.levels.length, maxLevels);
-  for (var level = 0; level < count; level++) {
+  final count = math.min(texture.levels.length, firstLevel + maxLevels);
+  for (var level = firstLevel; level < count; level++) {
     final size = mipSize(width, height, level);
     final payload = _levelPayload(texture, level);
     final blockCount = ((size.width + 3) >> 2) * ((size.height + 3) >> 2);
@@ -104,19 +109,21 @@ List<BlockLevel>? repackStandardKtx2ToAstc(Ktx2Texture texture, int maxLevels) {
 }
 
 /// Transcodes up to [maxLevels] stored levels of an ETC1S [texture] to
-/// [target] blocks, or returns null when it is not ETC1S.
+/// [target] blocks, starting at the stored level [firstLevel], or returns
+/// null when it is not ETC1S.
 List<BlockLevel>? transcodeStandardKtx2Etc1s(
   Ktx2Texture texture,
   Etc1sTarget target,
   int maxLevels, {
   bool allowThreeColorBc1 = true,
+  int firstLevel = 0,
 }) {
   final (:width, :height) = _checkStandard2d(texture);
   if (readDataFormat(texture).colorModel != kDfModelEtc1s) return null;
   final transcoder = _etc1sTranscoder(texture);
   final levels = <BlockLevel>[];
-  final count = math.min(texture.levels.length, maxLevels);
-  for (var level = 0; level < count; level++) {
+  final count = math.min(texture.levels.length, firstLevel + maxLevels);
+  for (var level = firstLevel; level < count; level++) {
     final size = mipSize(width, height, level);
     levels.add((
       width: size.width,
@@ -147,11 +154,15 @@ Etc1sTranscoder _etc1sTranscoder(Ktx2Texture texture) {
   );
 }
 
-/// Decodes every stored mip level of a standard KTX2 [texture] to RGBA8.
-/// Pure data work, safe to run on a background isolate. Throws
+/// Decodes every stored mip level of a standard KTX2 [texture] to RGBA8,
+/// from the stored level [firstLevel] down (a size cap skips the larger
+/// levels). Pure data work, safe to run on a background isolate. Throws
 /// [Ktx2FormatException] or [FormatException] on malformed or unsupported
 /// content.
-StandardKtx2Image decodeStandardKtx2(Ktx2Texture texture) {
+StandardKtx2Image decodeStandardKtx2(
+  Ktx2Texture texture, {
+  int firstLevel = 0,
+}) {
   final (:width, :height) = _checkStandard2d(texture);
   final format = readDataFormat(texture);
   final srgb = format.isSrgb;
@@ -159,7 +170,7 @@ StandardKtx2Image decodeStandardKtx2(Ktx2Texture texture) {
   switch (format.colorModel) {
     case kDfModelUastc:
       final levels = <MipLevel>[];
-      for (var level = 0; level < texture.levels.length; level++) {
+      for (var level = firstLevel; level < texture.levels.length; level++) {
         final size = mipSize(width, height, level);
         final payload = _levelPayload(texture, level);
         levels.add(
@@ -178,7 +189,7 @@ StandardKtx2Image decodeStandardKtx2(Ktx2Texture texture) {
     case kDfModelEtc1s:
       final transcoder = _etc1sTranscoder(texture);
       final levels = <MipLevel>[];
-      for (var level = 0; level < texture.levels.length; level++) {
+      for (var level = firstLevel; level < texture.levels.length; level++) {
         final size = mipSize(width, height, level);
         levels.add(
           MipLevel(
@@ -202,7 +213,7 @@ StandardKtx2Image decodeStandardKtx2(Ktx2Texture texture) {
       if (texture.vkFormat == _vkFormatRgba8Unorm ||
           texture.vkFormat == _vkFormatRgba8Srgb) {
         final levels = <MipLevel>[];
-        for (var level = 0; level < texture.levels.length; level++) {
+        for (var level = firstLevel; level < texture.levels.length; level++) {
           final size = mipSize(width, height, level);
           final payload = _levelPayload(texture, level);
           final byteLength = size.width * size.height * 4;
@@ -228,6 +239,21 @@ StandardKtx2Image decodeStandardKtx2(Ktx2Texture texture) {
         '(vkFormat ${texture.vkFormat})',
       );
   }
+}
+
+/// How many of [texture]'s larger stored levels to skip so the base level's
+/// longest side fits [maxSize]; never skips the smallest stored level, so an
+/// oversized base-only file loads at its stored size. `null` skips none.
+int ktx2LevelsAbove(Ktx2Texture texture, int? maxSize) {
+  if (maxSize == null || maxSize < 1) return 0;
+  final width = texture.pixelWidth;
+  final height = math.max(1, texture.pixelHeight);
+  var skip = 0;
+  while (skip < texture.levels.length - 1 &&
+      math.max(width >> skip, height >> skip) > maxSize) {
+    skip++;
+  }
+  return skip;
 }
 
 /// A level's bytes with the container's supercompression undone.

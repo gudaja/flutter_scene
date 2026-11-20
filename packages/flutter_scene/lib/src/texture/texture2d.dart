@@ -296,10 +296,12 @@ class Texture2D implements TextureSource {
   }
 
   /// Uploads a standard KTX2 file from [bytes] (Basis Universal UASTC or
-  /// ETC1S, or plain RGBA8, as glTF `KHR_texture_basisu` carries): block
-  /// compressed where the device samples the payload's family (UASTC to ASTC
-  /// 4x4, ETC1S to BC or ETC2), otherwise decoded to rgba8. The transcode runs
-  /// off the main isolate and the file's own mip chain is uploaded. [maxSize]
+  /// ETC1S, or plain RGBA8, as glTF `KHR_texture_basisu` carries, or ASTC 4x4
+  /// blocks stored as is): block compressed where the device samples the
+  /// payload's family (UASTC to ASTC 4x4, ETC1S to BC or ETC2, stored ASTC
+  /// without transcoding), otherwise decoded to rgba8 (stored ASTC then fails:
+  /// there is no CPU ASTC decoder). The decode runs off the main isolate and
+  /// the file's own mip chain is uploaded. [maxSize]
   /// caps the longest side by skipping the file's larger stored levels (no
   /// resampling; a base-only file loads at its stored size). Throws a
   /// [Ktx2FormatException] when the file cannot be decoded.
@@ -316,7 +318,8 @@ class Texture2D implements TextureSource {
   /// The block-compression families the current GPU context samples, by
   /// name (`astc`, `bc`, `etc2`), most preferred first. A UASTC KTX2 file
   /// uploads compressed only with `astc`, ETC1S with `bc` or `etc2`; without
-  /// them [fromKtx2Bytes] decodes to rgba8.
+  /// them [fromKtx2Bytes] decodes to rgba8. A stored ASTC 4x4 file needs
+  /// `astc`.
   static List<String> get blockCompressionFamilies => [
     for (final family in currentCompressionSupport()) family.name,
   ];

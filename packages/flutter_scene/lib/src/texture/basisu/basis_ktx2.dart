@@ -21,6 +21,19 @@ import 'package:flutter_scene/src/texture/supercompress/zstd.dart';
 const int _vkFormatRgba8Unorm = 37;
 const int _vkFormatRgba8Srgb = 43;
 
+/// VK_FORMAT_ASTC_4x4_UNORM_BLOCK / _SRGB_BLOCK: a standard KTX2 file holding
+/// ASTC 4x4 blocks encoded ahead of time (no Basis payload). Uploads as is on
+/// devices that sample ASTC; there is no CPU decoder for general ASTC, so
+/// elsewhere the file cannot load ([decodeStandardKtx2] throws).
+const int kVkFormatAstc4x4Unorm = 157;
+const int kVkFormatAstc4x4Srgb = 158;
+
+/// Whether [texture] stores ASTC 4x4 blocks directly ([kVkFormatAstc4x4Unorm]
+/// or [kVkFormatAstc4x4Srgb]).
+bool isAstc4x4Ktx2(Ktx2Texture texture) =>
+    texture.vkFormat == kVkFormatAstc4x4Unorm ||
+    texture.vkFormat == kVkFormatAstc4x4Srgb;
+
 /// Whether [bytes] start with the KTX2 file identifier.
 bool looksLikeKtx2(Uint8List bytes) {
   if (bytes.length < ktx2Identifier.length) return false;
@@ -103,6 +116,36 @@ List<BlockLevel>? repackStandardKtx2ToAstc(
       width: size.width,
       height: size.height,
       blocks: transcodeUastcToAstc4x4(payload, blockCount),
+    ));
+  }
+  return levels;
+}
+
+/// The stored levels of an ASTC 4x4 [texture] ([isAstc4x4Ktx2]) with the
+/// container's supercompression undone, ready to upload without transcoding,
+/// or null when [texture] does not store ASTC 4x4. At most [maxLevels]
+/// levels, starting at the stored level [firstLevel] (a size cap skips the
+/// larger levels).
+List<BlockLevel>? readStandardKtx2Astc(
+  Ktx2Texture texture,
+  int maxLevels, {
+  int firstLevel = 0,
+}) {
+  if (!isAstc4x4Ktx2(texture)) return null;
+  final (:width, :height) = _checkStandard2d(texture);
+  final levels = <BlockLevel>[];
+  final count = math.min(texture.levels.length, firstLevel + maxLevels);
+  for (var level = firstLevel; level < count; level++) {
+    final size = mipSize(width, height, level);
+    final payload = _levelPayload(texture, level);
+    final byteLength = ((size.width + 3) >> 2) * ((size.height + 3) >> 2) * 16;
+    if (payload.length < byteLength) {
+      throw Ktx2FormatException('Truncated ASTC 4x4 level $level');
+    }
+    levels.add((
+      width: size.width,
+      height: size.height,
+      blocks: Uint8List.sublistView(payload, 0, byteLength),
     ));
   }
   return levels;

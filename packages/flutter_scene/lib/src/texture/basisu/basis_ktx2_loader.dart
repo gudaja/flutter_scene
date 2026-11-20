@@ -4,7 +4,9 @@
 // once; only the uploads run on the main thread.
 //
 // UASTC repacks to ASTC where supported. ETC1S transcodes to BC or ETC2, in
-// compressionFamilyPreference order. Everything else decodes to rgba8.
+// compressionFamilyPreference order. Files storing ASTC 4x4 blocks directly
+// (vkFormat ASTC 4x4) upload as is where ASTC is supported and fail to load
+// elsewhere. Everything else decodes to rgba8.
 // TODO(uastc-bc7-transcode): a BC7 repack would give BC-only desktops the
 // same compressed path for UASTC; they fall back to rgba8 today.
 
@@ -31,7 +33,7 @@ enum StandardKtx2Upload {
   /// Decoded pixels.
   rgba8,
 
-  /// UASTC blocks repacked to ASTC 4x4.
+  /// ASTC 4x4 blocks: UASTC repacked, or stored as is.
   astc4x4,
 
   /// ETC1S as ETC1 blocks, uploaded as ETC2 RGB8.
@@ -59,7 +61,10 @@ CompressionSupport currentCompressionSupport() => [
 
 /// Picks the upload format for a standard KTX2 file. A base-only file that
 /// needs a mip chain ([mips] with one [storedLevels]) decodes to rgba8 so the
-/// engine can build one, as does ETC1S that is not whole 4x4 blocks.
+/// engine can build one, as does ETC1S that is not whole 4x4 blocks. A file
+/// storing ASTC 4x4 blocks ([astcBlocks]) uploads them as stored, base-only
+/// included, where ASTC is supported; elsewhere it is rgba8, which fails to
+/// decode (no CPU ASTC decoder).
 StandardKtx2Upload chooseStandardKtx2Upload({
   required int colorModel,
   required bool hasAlpha,
@@ -68,7 +73,13 @@ StandardKtx2Upload chooseStandardKtx2Upload({
   required int storedLevels,
   required bool mips,
   required CompressionSupport support,
+  bool astcBlocks = false,
 }) {
+  if (astcBlocks) {
+    return support.contains(gpu.TextureCompressionFamily.astc)
+        ? StandardKtx2Upload.astc4x4
+        : StandardKtx2Upload.rgba8;
+  }
   if (mips && storedLevels < 2) return StandardKtx2Upload.rgba8;
   switch (colorModel) {
     case kDfModelUastc:
@@ -207,14 +218,13 @@ StandardKtx2Decoded decodeStandardKtx2ForUpload(
       storedLevels: texture.levels.length - first,
       mips: mips,
       support: support,
+      astcBlocks: isAstc4x4Ktx2(texture),
     );
     final List<BlockLevel>? blocks = switch (upload) {
       StandardKtx2Upload.rgba8 => null,
-      StandardKtx2Upload.astc4x4 => repackStandardKtx2ToAstc(
-        texture,
-        maxLevels,
-        firstLevel: first,
-      ),
+      StandardKtx2Upload.astc4x4 =>
+        readStandardKtx2Astc(texture, maxLevels, firstLevel: first) ??
+            repackStandardKtx2ToAstc(texture, maxLevels, firstLevel: first),
       StandardKtx2Upload.etc2Rgb => transcodeStandardKtx2Etc1s(
         texture,
         Etc1sTarget.etc1,

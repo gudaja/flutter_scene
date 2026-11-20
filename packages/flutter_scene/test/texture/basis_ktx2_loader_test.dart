@@ -32,6 +32,7 @@ StandardKtx2Upload _choose({
   int storedLevels = 7,
   bool mips = true,
   CompressionSupport support = _appleSilicon,
+  bool astcBlocks = false,
 }) => chooseStandardKtx2Upload(
   colorModel: colorModel,
   hasAlpha: hasAlpha,
@@ -40,6 +41,7 @@ StandardKtx2Upload _choose({
   storedLevels: storedLevels,
   mips: mips,
   support: support,
+  astcBlocks: astcBlocks,
 );
 
 StandardKtx2Decoded _decode(
@@ -119,6 +121,32 @@ void main() {
       );
     });
 
+    test('stored ASTC 4x4 blocks upload as is, base-only included', () {
+      const astc = 162; // KHR_DF_MODEL_ASTC
+      for (final levels in [7, 1]) {
+        expect(
+          _choose(colorModel: astc, storedLevels: levels, astcBlocks: true),
+          StandardKtx2Upload.astc4x4,
+        );
+        expect(
+          _choose(
+            colorModel: astc,
+            storedLevels: levels,
+            astcBlocks: true,
+            support: _mobile,
+          ),
+          StandardKtx2Upload.astc4x4,
+        );
+      }
+      // No CPU ASTC decoder: rgba8 here means the decode reports an error.
+      for (final support in [_desktop, _none]) {
+        expect(
+          _choose(colorModel: astc, astcBlocks: true, support: support),
+          StandardKtx2Upload.rgba8,
+        );
+      }
+    });
+
     test('other color models decode to rgba8', () {
       expect(_choose(colorModel: 1), StandardKtx2Upload.rgba8);
     });
@@ -195,6 +223,39 @@ void main() {
       );
     });
 
+    test('a stored ASTC 4x4 file uploads its blocks without transcoding', () {
+      // astc_srgb_mips_zstd_64.ktx2 = the UASTC fixture's ASTC repack
+      // (uastc_srgb_mips_zstd_64.astc) stored as vkFormat ASTC_4x4_SRGB with
+      // Zstandard supercompression, so the upload matches the repack exactly.
+      final stored = _decode('astc_srgb_mips_zstd_64', support: _mobile);
+      final repacked = _decode('uastc_srgb_mips_zstd_64', support: _mobile);
+      expect(stored.upload, StandardKtx2Upload.astc4x4);
+      expect(
+        [for (final l in stored.levels) l.width],
+        [for (final l in repacked.levels) l.width],
+      );
+      expect(_concat(stored.levels), _concat(repacked.levels));
+      expect(
+        _concat(stored.levels),
+        _goldenPrefix('uastc_srgb_mips_zstd_64.astc', stored.levels),
+      );
+    });
+
+    test('a stored ASTC 4x4 file without ASTC support reports an error', () {
+      for (final support in [_desktop, _none]) {
+        final decoded = decodeStandardKtx2ForUpload(
+          (
+            bytes: _fixture('astc_srgb_mips_zstd_64.ktx2'),
+            content: TextureContent.color,
+          ),
+          mips: true,
+          support: support,
+        );
+        expect(decoded.error, isNotNull);
+        expect(decoded.levels, isEmpty);
+      }
+    });
+
     test('a truncated file reports an error instead of throwing', () {
       final bytes = _fixture('etc1s_srgb_mips_64.ktx2');
       final decoded = decodeStandardKtx2ForUpload(
@@ -233,6 +294,18 @@ void main() {
 
     test('UASTC skips the stored levels above the cap', () {
       final decoded = capped('uastc_srgb_mips_zstd_64', 16, support: _mobile);
+      expect(decoded.error, isNull);
+      expect(decoded.upload, StandardKtx2Upload.astc4x4);
+      expect([for (final l in decoded.levels) l.width], [16, 8, 4, 2]);
+      final rest = goldenFrom('uastc_srgb_mips_zstd_64.astc', [64, 32], 16);
+      expect(
+        _concat(decoded.levels),
+        Uint8List.sublistView(rest, 0, _concat(decoded.levels).length),
+      );
+    });
+
+    test('stored ASTC 4x4 skips the stored levels above the cap', () {
+      final decoded = capped('astc_srgb_mips_zstd_64', 16, support: _mobile);
       expect(decoded.error, isNull);
       expect(decoded.upload, StandardKtx2Upload.astc4x4);
       expect([for (final l in decoded.levels) l.width], [16, 8, 4, 2]);

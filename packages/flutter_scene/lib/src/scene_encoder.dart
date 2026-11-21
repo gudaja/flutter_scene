@@ -408,14 +408,28 @@ gpu.RenderPipeline? _cachedPipeline(
 /// The already-built pipeline for this shader pair and layout, or null.
 ///
 /// Lets a per-draw caller skip [tryResolvePipeline] and the debug closure it
-/// takes when the pipeline exists.
+/// takes when the pipeline exists. A pipeline still linking in the background
+/// (or whose link failed) is not returned, so the caller falls through to
+/// [tryResolvePipeline], which skips the draw instead of binding it, and
+/// binding would wait for the link.
 @internal
 gpu.RenderPipeline? cachedRenderPipeline(
   gpu.Shader vertexShader,
   gpu.Shader fragmentShader,
   VertexLayoutDescriptor? vertexLayout,
-) =>
-    _cachedPipeline(vertexShader, fragmentShader, vertexLayoutId(vertexLayout));
+) {
+  final pipeline = _cachedPipeline(
+    vertexShader,
+    fragmentShader,
+    vertexLayoutId(vertexLayout),
+  );
+  if (pipeline == null) return null;
+  try {
+    return gpu.gpuHost.isPipelineReady(pipeline) ? pipeline : null;
+  } on Exception {
+    return null; // tryResolvePipeline reports and rejects it
+  }
+}
 
 /// Pipeline keys the backend refused to build, so a rejected pairing is not
 /// retried every frame. Keyed exactly like [_pipelineCache] and evicted with

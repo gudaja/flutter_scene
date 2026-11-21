@@ -153,14 +153,11 @@ void main() {
     if (program == null || vao == null) {
       throw StateError('Failed to create the mip generation program');
     }
-    gl.attachShader(
-      program,
-      _compile(gl, web.WebGL2RenderingContext.VERTEX_SHADER, _vertexSource),
-    );
-    gl.attachShader(
-      program,
-      _compile(gl, web.WebGL2RenderingContext.FRAGMENT_SHADER, _fragmentSource),
-    );
+    // Compile status read only if the link fails (one round trip, not three).
+    final vs = _compile(gl, web.WebGL2RenderingContext.VERTEX_SHADER);
+    final fs = _compile(gl, web.WebGL2RenderingContext.FRAGMENT_SHADER);
+    gl.attachShader(program, vs.shader);
+    gl.attachShader(program, fs.shader);
     gl.linkProgram(program);
     final linked = gl.getProgramParameter(
       program,
@@ -169,7 +166,7 @@ void main() {
     if (!(linked.isA<JSBoolean>() && (linked as JSBoolean).toDart)) {
       throw StateError(
         'Mip generation program failed to link: '
-        '${gl.getProgramInfoLog(program)}',
+        '${linkFailureLog(gl.getProgramInfoLog(program), [vs.compile, fs.compile])}',
       );
     }
     _program = program;
@@ -179,27 +176,31 @@ void main() {
     _modeLocation = gl.getUniformLocation(program, 'u_mode');
   }
 
-  static web.WebGLShader _compile(
+  static ({web.WebGLShader shader, ShaderCompile compile}) _compile(
     web.WebGL2RenderingContext gl,
     int type,
-    String source,
   ) {
     final shader = gl.createShader(type);
     if (shader == null) {
       throw StateError('Failed to create a mip generation shader');
     }
-    gl.shaderSource(shader, source);
+    final vertex = type == web.WebGL2RenderingContext.VERTEX_SHADER;
+    gl.shaderSource(shader, vertex ? _vertexSource : _fragmentSource);
     gl.compileShader(shader);
-    final compiled = gl.getShaderParameter(
-      shader,
-      web.WebGL2RenderingContext.COMPILE_STATUS,
+    return (
+      shader: shader,
+      compile: ShaderCompile(
+        stage: vertex ? 'vertex' : 'fragment',
+        isCompiled: () {
+          final compiled = gl.getShaderParameter(
+            shader,
+            web.WebGL2RenderingContext.COMPILE_STATUS,
+          );
+          return compiled.isA<JSBoolean>() && (compiled as JSBoolean).toDart;
+        },
+        infoLog: () => gl.getShaderInfoLog(shader),
+        source: () => gl.getShaderSource(shader),
+      ),
     );
-    if (!(compiled.isA<JSBoolean>() && (compiled as JSBoolean).toDart)) {
-      throw StateError(
-        'Mip generation shader failed to compile: '
-        '${gl.getShaderInfoLog(shader)}',
-      );
-    }
-    return shader;
   }
 }

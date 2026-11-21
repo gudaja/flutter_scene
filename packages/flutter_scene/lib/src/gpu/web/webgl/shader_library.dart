@@ -48,7 +48,10 @@ final class WebGlShaderLibrary extends ShaderLibrary {
       final name = entry.name;
       final backend = entry.openglEs;
       if (name == null || backend == null) continue;
-      final shader = _buildFromBackend(backend);
+      // Compiled without reading the status (see WebGlShader._compile): the
+      // driver compiles the whole bundle in parallel, and the first link that
+      // uses a shader proves it or reports its compile error.
+      final shader = _buildFromBackend(backend, checkCompile: false);
       shaders[name] = shader;
       if (assetName != null) {
         _shadersByAsset.putIfAbsent(assetName, () => []).add((
@@ -60,19 +63,28 @@ final class WebGlShaderLibrary extends ShaderLibrary {
     return WebGlShaderLibrary._(shaders);
   }
 
-  static WebGlShader _buildFromBackend(fb.BackendShader backend) {
+  static WebGlShader _buildFromBackend(
+    fb.BackendShader backend, {
+    bool checkCompile = true,
+  }) {
     final stage = backend.stage == fb.ShaderStage.kFragment
         ? ShaderStage.fragment
         : ShaderStage.vertex;
     final shader = WebGlShader._(webGlContext, stage);
-    _populateFromBackend(shader, backend);
+    _populateFromBackend(shader, backend, checkCompile: checkCompile);
     return shader;
   }
 
   /// (Re)compiles [backend] into [shader] in place: replaces the GL shader
   /// object and rebuilds the reflection state, keeping the [Shader]'s
-  /// identity so materials and pipeline-cache keys stay valid.
-  static void _populateFromBackend(Shader shader, fb.BackendShader backend) {
+  /// identity so materials and pipeline-cache keys stay valid. With
+  /// [checkCompile] false a compile error is reported by the first link
+  /// instead of thrown here (see [WebGlShader._compile]).
+  static void _populateFromBackend(
+    Shader shader,
+    fb.BackendShader backend, {
+    bool checkCompile = true,
+  }) {
     shader.webGl._entrypoint = backend.entrypoint;
 
     final sourceBytes = backend.shader;
@@ -86,7 +98,7 @@ final class WebGlShaderLibrary extends ShaderLibrary {
     if (shader.stage == ShaderStage.vertex && webGlContext.clipDepthZeroToOne) {
       source = stripClipSpaceDepthRemap(source);
     }
-    shader.webGl._compile(source);
+    shader.webGl._compile(source, checkNow: checkCompile);
 
     // Rebuild the reflection state from scratch (a reload may have changed
     // the uniforms, inputs, or samplers).
@@ -173,6 +185,7 @@ final class WebGlShaderLibrary extends ShaderLibrary {
           entry.source,
           isFragment: entry.stage == ShaderStage.fragment,
         ),
+        checkNow: false,
       );
       compiled[name] = s;
     });

@@ -90,6 +90,10 @@ final class WebGlShader extends Shader {
 
   web.WebGLShader? _glShader;
 
+  /// The compile of [_glShader], whose status is read only when a program
+  /// using it fails to link (see [_compile]).
+  ShaderCompile? _compileState;
+
   // Bumped by every (re)compile; pipeline caches key on it so a hot-reloaded
   // shader links a fresh program while untouched shaders keep their cache.
   int _generation = 0;
@@ -140,7 +144,14 @@ final class WebGlShader extends Shader {
   /// shader's `_glShader`. Internal use; callers (ShaderLibrary loader,
   /// inline factories) provide source that has been preprocessed if
   /// necessary.
-  void _compile(String source) {
+  ///
+  /// With [checkNow] false the compile status is not read here: reading it
+  /// waits for this shader's compile (a GPU round trip per shader), while
+  /// unchecked the driver compiles a whole library in parallel, and a compile
+  /// error surfaces, with this shader's info log and source, from the link
+  /// of the first pipeline using it (see [linkFailureLog]). A hot reload
+  /// checks now, so a broken edit throws and the working shader stays.
+  void _compile(String source, {bool checkNow = true}) {
     final gl = _gpuContext._gl;
     final type = stage == ShaderStage.vertex
         ? web.WebGL2RenderingContext.VERTEX_SHADER
@@ -151,17 +162,24 @@ final class WebGlShader extends Shader {
     }
     gl.shaderSource(s, source);
     gl.compileShader(s);
-    final ok =
-        (gl.getShaderParameter(s, web.WebGL2RenderingContext.COMPILE_STATUS)
-                as JSBoolean?)
-            ?.toDart ??
-        false;
-    if (!ok) {
-      final log = gl.getShaderInfoLog(s) ?? '<no info log>';
-      gl.deleteShader(s);
-      throw Exception(
-        'Failed to compile ${stage.name} shader:\n$log\n--- source ---\n$source',
-      );
+    final compile = ShaderCompile(
+      stage: stage.name,
+      isCompiled: () =>
+          (gl.getShaderParameter(s, web.WebGL2RenderingContext.COMPILE_STATUS)
+                  as JSBoolean?)
+              ?.toDart ??
+          false,
+      infoLog: () => gl.getShaderInfoLog(s),
+      // WebGL keeps the source on its shader object: no round trip, and
+      // nothing held on the Dart side for shaders that compiled.
+      source: () => gl.getShaderSource(s),
+    );
+    if (checkNow) {
+      final error = compile.error();
+      if (error != null) {
+        gl.deleteShader(s);
+        throw Exception(error);
+      }
     }
     // On a hot-reload recompile, release the replaced shader object (linked
     // programs keep their own copy of the code, so this only frees the
@@ -169,6 +187,7 @@ final class WebGlShader extends Shader {
     final previous = _glShader;
     if (previous != null) gl.deleteShader(previous);
     _glShader = s;
+    _compileState = compile;
     _generation++;
   }
 }

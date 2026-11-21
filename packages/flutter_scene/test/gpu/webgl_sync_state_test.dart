@@ -1,5 +1,6 @@
 // The WebGL2 backend's bookkeeping for synchronous queries: when a program's
-// link status and a framebuffer's completeness are asked for. Pure Dart, so it
+// link status, a shader's compile status and a framebuffer's completeness are
+// asked for. Pure Dart, so it
 // runs on the VM against fake GL queries.
 // ignore_for_file: implementation_imports
 import 'package:flutter_scene/src/gpu/web/webgl_sync_state.dart';
@@ -26,6 +27,32 @@ class _FakeProgram {
     },
     onLinked: () => reflections++,
     nowMicros: () => now,
+  );
+}
+
+/// Fake GL shader object: counts the compile-status and info-log queries.
+class _FakeShader {
+  _FakeShader(this.stage, {this.compiled = true});
+  final String stage;
+  final bool compiled;
+  int statusQueries = 0;
+  int logQueries = 0;
+  int sourceQueries = 0;
+
+  late final ShaderCompile compile = ShaderCompile(
+    stage: stage,
+    isCompiled: () {
+      statusQueries++;
+      return compiled;
+    },
+    infoLog: () {
+      logQueries++;
+      return 'ERROR: 0:3: \'v_x\' : undeclared identifier';
+    },
+    source: () {
+      sourceQueries++;
+      return '#version 300 es\nvoid main() { v_x; }';
+    },
   );
 }
 
@@ -130,6 +157,59 @@ void main() {
       final bad = _FakeProgram()..error = 'no main';
       expect(() => bad.link(parallel: false), throwsA(isA<Exception>()));
       expect(bad.reflections, 0);
+    });
+  });
+
+  group('ShaderCompile', () {
+    test('T-WR81h6-1 · compiling and a successful link never read the '
+        'compile status', () {
+      final vs = _FakeShader('vertex');
+      final fs = _FakeShader('fragment');
+      // The pipeline linked: both stages compiled.
+      vs.compile.markCompiled();
+      fs.compile.markCompiled();
+      expect(vs.compile.error(), isNull);
+      expect(fs.compile.error(), isNull);
+      expect(vs.statusQueries + fs.statusQueries, 0);
+      expect(vs.logQueries + fs.logQueries, 0);
+    });
+
+    test('T-WR81h6-2 · a failed link names the stage that failed to compile '
+        'with its info log and source, querying each shader once', () {
+      final vs = _FakeShader('vertex');
+      final fs = _FakeShader('fragment', compiled: false);
+      final log = linkFailureLog('L0001: fragment shader not compiled', [
+        vs.compile,
+        fs.compile,
+      ]);
+      expect(log, contains('Failed to compile fragment shader:'));
+      expect(log, contains("'v_x' : undeclared identifier"));
+      expect(log, contains('--- source ---\n#version 300 es'));
+      expect(log, contains('L0001: fragment shader not compiled'));
+      expect(log, isNot(contains('vertex shader')));
+      expect(vs.statusQueries, 1);
+      expect(fs.statusQueries, 1);
+      expect(vs.logQueries, 0);
+      expect(fs.logQueries, 1);
+
+      // A second pipeline with the same broken shader: no new queries.
+      linkFailureLog('again', [vs.compile, fs.compile]);
+      expect(vs.statusQueries + fs.statusQueries, 2);
+      expect(fs.logQueries + fs.sourceQueries, 2);
+    });
+
+    test('T-WR81h6-3 · a link failure between compiled shaders reports the '
+        'program log alone', () {
+      final vs = _FakeShader('vertex');
+      final fs = _FakeShader('fragment');
+      final log = linkFailureLog('L0010: varying v_missing not written', [
+        vs.compile,
+        fs.compile,
+      ]);
+      expect(log, 'L0010: varying v_missing not written');
+      expect(vs.statusQueries, 1);
+      expect(fs.statusQueries, 1);
+      expect(vs.logQueries + fs.logQueries, 0);
     });
   });
 

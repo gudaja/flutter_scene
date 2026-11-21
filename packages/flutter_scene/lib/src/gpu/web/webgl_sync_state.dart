@@ -137,3 +137,67 @@ final class FramebufferCompleteness {
   /// Signatures known complete.
   int get knownComplete => _complete.length;
 }
+
+/// The compile of one WebGL shader object whose `COMPILE_STATUS` is not read
+/// right after `compileShader`.
+///
+/// Reading it waits for that shader's compile on the calling thread, one
+/// round trip per shader; loading a shader library that way serialises ~100
+/// compiles the driver could run in parallel. A compile error also fails the
+/// link of every program using the shader, so the status is read only when a
+/// link failed ([linkFailureLog]), to put the shader's info log into the
+/// error. A successful link proves the compile ([markCompiled]).
+final class ShaderCompile {
+  /// Tracks a shader whose `compileShader` was just issued.
+  ///
+  /// [isCompiled] queries `COMPILE_STATUS` (blocking), [infoLog] and [source]
+  /// read the shader's info log and source for the error message. The
+  /// constructor calls none of them.
+  ShaderCompile({
+    required this.stage,
+    required bool Function() isCompiled,
+    required String? Function() infoLog,
+    required String? Function() source,
+  }) : _isCompiled = isCompiled,
+       _infoLog = infoLog,
+       _source = source;
+
+  /// The shader stage's name, for the message ("vertex", "fragment").
+  final String stage;
+  final bool Function() _isCompiled;
+  final String? Function() _infoLog;
+  final String? Function() _source;
+
+  bool _checked = false;
+  String? _error;
+
+  /// Records that the shader compiled (a program using it linked), so a
+  /// later [error] does not query.
+  void markCompiled() {
+    _checked = true;
+    _error = null;
+  }
+
+  /// Null when the shader compiled, otherwise the compile error with the
+  /// shader's info log and source. Queries the status at most once.
+  String? error() {
+    if (_checked) return _error;
+    _checked = true;
+    if (_isCompiled()) return null;
+    return _error =
+        'Failed to compile $stage shader:\n'
+        '${_infoLog() ?? '<no info log>'}\n'
+        '--- source ---\n'
+        '${_source() ?? '<source unavailable>'}';
+  }
+}
+
+/// The error of a failed program link: the compile errors of [shaders] (each
+/// queried once, see [ShaderCompile.error]) followed by [programLog], or the
+/// program log alone when every shader compiled.
+String linkFailureLog(String? programLog, Iterable<ShaderCompile> shaders) {
+  final compileErrors = [for (final shader in shaders) ?shader.error()];
+  final log = programLog ?? '<no info log>';
+  if (compileErrors.isEmpty) return log;
+  return '${compileErrors.join('\n')}\n--- program log ---\n$log';
+}

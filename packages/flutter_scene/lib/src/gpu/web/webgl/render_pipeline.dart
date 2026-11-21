@@ -35,6 +35,12 @@ final class WebGlRenderPipeline extends RenderPipeline {
       gl.bindAttribLocation(program, input.location, input.name);
     }
 
+    // The shaders' compile status is read only if the link fails (see
+    // WebGlShader._compile); captured now, as a hot reload may replace them.
+    final compiles = [
+      ?vertexShader._compileState,
+      ?fragmentShader._compileState,
+    ];
     gl.linkProgram(program);
     // Reading LINK_STATUS right after linkProgram waits for the whole link
     // (and every command queued before it) on the calling thread. With
@@ -57,8 +63,15 @@ final class WebGlRenderPipeline extends RenderPipeline {
                     as JSBoolean?)
                 ?.toDart ??
             false;
-        if (ok) return null;
-        final log = gl.getProgramInfoLog(program) ?? '<no info log>';
+        if (ok) {
+          for (final compile in compiles) {
+            compile.markCompiled();
+          }
+          return null;
+        }
+        // A shader that failed to compile fails the link: name it, with its
+        // info log, as a compile check right after compileShader would have.
+        final log = linkFailureLog(gl.getProgramInfoLog(program), compiles);
         gl.deleteProgram(program);
         _gpuContext._forgetPipeline(this);
         return log;

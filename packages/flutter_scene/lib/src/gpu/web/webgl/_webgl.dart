@@ -18,6 +18,7 @@ import '../../shared/gpu_capabilities.dart';
 import '../../shared/shader_library_sources.dart';
 import '../_gpu.dart';
 import '../shader_bundle_generated.dart' as fb;
+import '../webgl_sync_state.dart';
 
 part 'backend.dart';
 part 'buffer.dart';

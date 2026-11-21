@@ -100,7 +100,14 @@ final class WebGlRenderPass extends RenderPass {
       mipLevel,
       slice,
       depth,
-      () => _createFramebuffer(gl, color, mipLevel, slice, depth),
+      () => _createFramebuffer(
+        gl,
+        _gpuContext._framebufferCompleteness,
+        color,
+        mipLevel,
+        slice,
+        depth,
+      ),
     );
     _fbo = fbo;
     gl.bindFramebuffer(web.WebGL2RenderingContext.FRAMEBUFFER, fbo);
@@ -114,6 +121,7 @@ final class WebGlRenderPass extends RenderPass {
 
   static web.WebGLFramebuffer _createFramebuffer(
     web.WebGL2RenderingContext gl,
+    FramebufferCompleteness completeness,
     Texture color,
     int mipLevel,
     int slice,
@@ -166,8 +174,22 @@ final class WebGlRenderPass extends RenderPass {
       }
     }
 
-    final status = gl.checkFramebufferStatus(
-      web.WebGL2RenderingContext.FRAMEBUFFER,
+    // checkFramebufferStatus is a synchronous GPU round trip (it waits for
+    // every queued command), and completeness depends only on the
+    // attachments' formats, sample counts and kinds, so it runs once per
+    // combination rather than once per new (resized, pooled) target.
+    final FramebufferSignature signature = (
+      colorFormat: color.webGl._glFormat.internalFormat,
+      colorSamples: color.sampleCount,
+      colorIsCube: color.textureType == TextureType.textureCube,
+      colorMipped: mipLevel != 0,
+      depthFormat: depth?.webGl._glFormat.internalFormat,
+      depthSamples: depth?.sampleCount ?? 0,
+    );
+    final status = completeness.status(
+      signature,
+      web.WebGL2RenderingContext.FRAMEBUFFER_COMPLETE,
+      () => gl.checkFramebufferStatus(web.WebGL2RenderingContext.FRAMEBUFFER),
     );
     if (status != web.WebGL2RenderingContext.FRAMEBUFFER_COMPLETE) {
       throw Exception(
@@ -217,8 +239,13 @@ final class WebGlRenderPass extends RenderPass {
   @override
   void bindPipeline(RenderPipeline pipeline) {
     final gl = _gpuContext._gl;
+    // A pipeline still linking in the background is finished here, blocking,
+    // as the link used to at creation. Draw paths that can skip a draw ask
+    // GpuHost.isPipelineReady first and never get here pending.
+    pipeline.webGl._finishLink();
     _boundPipeline = pipeline.webGl;
     gl.useProgram(pipeline.webGl._program);
+    _gpuContext._boundProgram = pipeline.webGl._program;
     // Give every active uniform block a valid (zeroed) buffer up front, so a
     // block the caller never binds does not raise a used-but-unbound uniform
     // buffer error on this backend. Explicit bindUniform calls override it.

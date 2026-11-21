@@ -36,19 +36,50 @@ final class WebGlRenderPipeline extends RenderPipeline {
     }
 
     gl.linkProgram(program);
-    final ok =
-        (gl.getProgramParameter(program, web.WebGL2RenderingContext.LINK_STATUS)
-                as JSBoolean?)
-            ?.toDart ??
-        false;
-    if (!ok) {
-      final log = gl.getProgramInfoLog(program) ?? '<no info log>';
-      gl.deleteProgram(program);
-      throw Exception('Failed to link program: $log');
-    }
-
-    _buildUniformCaches();
+    // Reading LINK_STATUS right after linkProgram waits for the whole link
+    // (and every command queued before it) on the calling thread. With
+    // KHR_parallel_shader_compile the link runs in the background instead:
+    // the pipeline stays pending until a non-blocking COMPLETION_STATUS_KHR
+    // query reports it done (see isLinkReady), and only then are the status
+    // and the reflection read. Without the extension this links at once.
+    _link = ProgramLink(
+      parallel: _gpuContext._parallelShaderCompile,
+      isComplete: () =>
+          (gl.getProgramParameter(program, _kCompletionStatusKhr) as JSBoolean?)
+              ?.toDart ??
+          true,
+      linkError: () {
+        final ok =
+            (gl.getProgramParameter(
+                      program,
+                      web.WebGL2RenderingContext.LINK_STATUS,
+                    )
+                    as JSBoolean?)
+                ?.toDart ??
+            false;
+        if (ok) return null;
+        final log = gl.getProgramInfoLog(program) ?? '<no info log>';
+        gl.deleteProgram(program);
+        _gpuContext._forgetPipeline(this);
+        return log;
+      },
+      onLinked: _buildUniformCaches,
+      nowMicros: _gpuContext._clockMicros,
+    );
   }
+
+  /// `COMPLETION_STATUS_KHR` (KHR_parallel_shader_compile).
+  static const int _kCompletionStatusKhr = 0x91B1;
+
+  late final ProgramLink _link;
+
+  /// Whether the program has linked, without waiting for a link that still
+  /// runs in the background. Throws the link failure.
+  bool get isLinkReady => _link.poll();
+
+  /// Completes a background link now, waiting for it (the path of a draw that
+  /// binds a pipeline nobody polled). Throws the link failure.
+  void _finishLink() => _link.finish();
 
   final WebGlContext _gpuContext;
   @override
@@ -99,6 +130,17 @@ final class WebGlRenderPipeline extends RenderPipeline {
   void _buildUniformCaches() {
     final gl = _gpuContext._gl;
     gl.useProgram(_program);
+    try {
+      _buildUniformCachesOnCurrentProgram(gl);
+    } finally {
+      // A background link can finish mid-pass, between another pipeline's
+      // bind and its draws, so give that pipeline its program back.
+      final bound = _gpuContext._boundProgram;
+      if (bound != null) gl.useProgram(bound);
+    }
+  }
+
+  void _buildUniformCachesOnCurrentProgram(web.WebGL2RenderingContext gl) {
     final yFlipLocation = gl.getUniformLocation(_program, '_impeller_y_flip');
     if (yFlipLocation != null) {
       // Impeller's generated GLES shaders multiply gl_Position.y by this

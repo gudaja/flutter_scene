@@ -32,6 +32,9 @@ final class WebGlContext extends GpuContext {
     // Cache extensions we rely on for later phases.
     _gl.getExtension('EXT_color_buffer_float');
     _gl.getExtension('OES_texture_float_linear');
+    // Links programs in the background; see WebGlRenderPipeline.isLinkReady.
+    _parallelShaderCompile =
+        _gl.getExtension('KHR_parallel_shader_compile') != null;
     // Anisotropic filtering. MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF.
     if (_gl.getExtension('EXT_texture_filter_anisotropic') != null) {
       _maxSupportedAnisotropy = _integerParameter(0x84FF) ?? 1;
@@ -52,6 +55,24 @@ final class WebGlContext extends GpuContext {
   }
 
   bool _clipDepthZeroToOne = false;
+
+  /// Whether KHR_parallel_shader_compile is enabled, so a program links in
+  /// the background and its status is polled instead of awaited.
+  bool _parallelShaderCompile = false;
+
+  /// Whether programs link in the background (KHR_parallel_shader_compile).
+  bool get parallelShaderCompile => _parallelShaderCompile;
+
+  final Stopwatch _clock = Stopwatch()..start();
+  int _clockMicros() => _clock.elapsedMicroseconds;
+
+  /// The program the last bound pipeline uses, restored after a background
+  /// link finishes (its reflection setup switches programs).
+  web.WebGLProgram? _boundProgram;
+
+  /// Framebuffer attachment combinations known complete.
+  final FramebufferCompleteness _framebufferCompleteness =
+      FramebufferCompleteness();
 
   /// Whether clip-space depth spans `[0, 1]` (EXT_clip_control), so GLES
   /// shaders run without their `[-1, 1]` depth remap.
@@ -279,8 +300,15 @@ final class WebGlContext extends GpuContext {
         _gl.deleteProgram(pipeline._program);
       }
       _pipelineCache.clear();
+      _boundProgram = null;
     }
     return _pipelineCache[key] = WebGlRenderPipeline._(this, vertex, fragment);
+  }
+
+  /// Drops [pipeline] from the linked-program cache (its link failed), so a
+  /// later request links afresh instead of reusing the failed program.
+  void _forgetPipeline(WebGlRenderPipeline pipeline) {
+    _pipelineCache.removeWhere((_, cached) => identical(cached, pipeline));
   }
 
   // Framebuffer cache, keyed by the attachment textures. A pass previously

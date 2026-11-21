@@ -18,6 +18,17 @@ class GpuHost {
     compute: false,
   );
 
+  /// Whether [pipeline] can draw now without waiting for its shaders.
+  ///
+  /// False while a backend that links programs in the background (WebGL2
+  /// with KHR_parallel_shader_compile) is still linking it: a draw that can
+  /// be skipped is skipped and retried on a later frame instead of blocking
+  /// the thread on the link. Throws the build failure once the link fails.
+  /// Binding a pipeline that is not ready waits for it.
+  ///
+  /// Always true: Impeller builds a pipeline when it is created.
+  bool isPipelineReady(RenderPipeline pipeline) => true;
+
   /// Hands [texture] to Flutter as a `ui.Image`, without a copy.
   ui.Image textureToImage(Texture texture) => texture.asImage();
 

@@ -447,9 +447,46 @@ T withPipelineBuildBudget<T>(Duration budget, T Function() body) {
   }
 }
 
-/// Draws the last [withPipelineBuildBudget] skipped for lack of budget.
+/// Draws the last [withPipelineBuildBudget] skipped for lack of budget, or
+/// because their pipeline was still linking in the background (counted
+/// outside a budget too, so a frame can tell it skipped draws).
 @internal
 int get deferredPipelineBuilds => _deferredBuilds;
+
+/// Draws skipped since startup because their pipeline was still linking in
+/// the background (see [gpu.GpuHost.isPipelineReady]). Monotonic; a frame
+/// that raises it is incomplete and asks for another.
+@internal
+int get pendingPipelineDraws => _pendingPipelineDraws;
+int _pendingPipelineDraws = 0;
+
+/// [pipeline] when it can draw now; null when its program still links in
+/// the background (the draw is skipped and counted, see
+/// [deferredPipelineBuilds]) or its link failed (the pairing is rejected and
+/// evicted, like a pipeline the backend refuses to create).
+gpu.RenderPipeline? _linkedOrSkip(
+  gpu.RenderPipeline pipeline,
+  (gpu.Shader, gpu.Shader, int) key,
+  String Function()? debugContext,
+) {
+  final bool ready;
+  try {
+    ready = gpu.gpuHost.isPipelineReady(pipeline);
+  } on Exception catch (error) {
+    _pipelineCache.remove(key);
+    _pipelineIndex[key.$1]?[key.$2]?.remove(key.$3);
+    _rejectedPipelines.add(key);
+    debugPrint(
+      'flutter_scene: skipping a draw whose pipeline failed to build'
+      '${debugContext != null ? ' (${debugContext()})' : ''}. $error',
+    );
+    return null;
+  }
+  if (ready) return pipeline;
+  _deferredBuilds++;
+  _pendingPipelineDraws++;
+  return null;
+}
 
 bool _deferBuild((gpu.Shader, gpu.Shader, int) key) {
   final budget = _buildBudget;
@@ -572,9 +609,15 @@ gpu.RenderPipeline? tryResolvePipeline(
   String Function()? debugContext,
 }) {
   final layoutId = vertexLayoutId(vertexLayout);
-  // A built pipeline is never rejected or deferred.
+  // A built pipeline is never deferred for budget, only while it links.
   final cached = _cachedPipeline(vertexShader, fragmentShader, layoutId);
-  if (cached != null) return cached;
+  if (cached != null) {
+    return _linkedOrSkip(cached, (
+      vertexShader,
+      fragmentShader,
+      layoutId,
+    ), debugContext);
+  }
   final key = (vertexShader, fragmentShader, layoutId);
   if (_rejectedPipelines.contains(key)) return null;
   if (_deferBuild(key)) return null;
@@ -589,8 +632,9 @@ gpu.RenderPipeline? tryResolvePipeline(
     debugPrint(interfaceProblem);
     return null;
   }
+  final gpu.RenderPipeline pipeline;
   try {
-    return resolvePipeline(
+    pipeline = resolvePipeline(
       vertexShader,
       fragmentShader,
       vertexLayout: vertexLayout,
@@ -604,6 +648,7 @@ gpu.RenderPipeline? tryResolvePipeline(
     );
     return null;
   }
+  return _linkedOrSkip(pipeline, key, debugContext);
 }
 
 // A pipeline is rejected once its draws fail in this many frames with no

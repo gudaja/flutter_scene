@@ -85,6 +85,7 @@ import 'scene_encoder.dart'
     show
         beginDrawFailureFrame,
         deferredPipelineBuilds,
+        pendingPipelineDraws,
         pipelineCacheSize,
         withPipelineBuildBudget;
 import 'render/render_scene.dart';
@@ -834,6 +835,8 @@ base class Scene implements SceneGraph {
       return;
     }
     _disposed = true;
+    _pendingPipelineRepaint?.cancel();
+    _pendingPipelineRepaint = null;
     // Not disposed, since the last pictures may still be on screen.
     _presentedImages.clear();
     surface.dispose();
@@ -2116,6 +2119,7 @@ base class Scene implements SceneGraph {
       final recorder = ui.PictureRecorder();
       final canvas = ui.Canvas(recorder);
       _warmUpIncludeOffscreen = includeOffscreen;
+      _warmingUp = true;
       // The tier frames follow the first while its GPU work still runs, and a
       // paced frame encodes nothing, so pacing is off while they encode.
       final framesInFlight = maxGpuFramesInFlight;
@@ -2141,6 +2145,7 @@ base class Scene implements SceneGraph {
         shadingTierOverride = null;
         maxGpuFramesInFlight = framesInFlight;
         _warmUpIncludeOffscreen = false;
+        _warmingUp = false;
         recorder.endRecording().dispose();
       }
     }
@@ -2186,6 +2191,34 @@ base class Scene implements SceneGraph {
   /// The scene is advanced once per call (a single per-frame tick), then
   /// every view is rendered from that shared scene state.
   void renderViews(
+    List<RenderView> views,
+    ui.Canvas canvas, {
+    ui.Rect? region,
+    double? pixelRatio,
+  }) {
+    final pendingBefore = pendingPipelineDraws;
+    _renderViews(views, canvas, region: region, pixelRatio: pixelRatio);
+    // Draws skipped while their programs link in the background (WebGL2 with
+    // KHR_parallel_shader_compile) leave this frame incomplete; a still scene
+    // would not paint again on its own, so ask for a frame once they may be
+    // done. Warm-up frames retry in their own loop.
+    if (pendingPipelineDraws > pendingBefore && !_warmingUp) {
+      _repaintForPendingPipelines();
+    }
+  }
+
+  bool _warmingUp = false;
+  Timer? _pendingPipelineRepaint;
+
+  void _repaintForPendingPipelines() {
+    if (_pendingPipelineRepaint != null) return;
+    _pendingPipelineRepaint = Timer(const Duration(milliseconds: 16), () {
+      _pendingPipelineRepaint = null;
+      if (!_disposed) _repaintRequested.notify();
+    });
+  }
+
+  void _renderViews(
     List<RenderView> views,
     ui.Canvas canvas, {
     ui.Rect? region,

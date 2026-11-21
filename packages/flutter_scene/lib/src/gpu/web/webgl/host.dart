@@ -19,6 +19,10 @@ final class WebGlHost extends GpuHost {
     compute: false,
   );
 
+  /// False while the program links in the background.
+  @override
+  bool isPipelineReady(RenderPipeline pipeline) => pipeline.webGl.isLinkReady;
+
   /// Hands [texture] to Flutter as a `ui.Image`.
   @override
   ui.Image textureToImage(Texture texture) => texture.asImage();

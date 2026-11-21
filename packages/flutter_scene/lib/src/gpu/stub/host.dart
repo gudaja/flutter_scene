@@ -15,6 +15,8 @@ class GpuHost {
     compute: false,
   );
 
+  bool isPipelineReady(RenderPipeline pipeline) => true;
+
   ui.Image textureToImage(Texture texture) => _stub();
 
   Texture? imageToTexture(ui.Image image) => null;

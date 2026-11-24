@@ -13,6 +13,9 @@ uniform FragInfo {
   // 1 when the base color is display-referred and passes through unchanged
   // (see Material.displayReferred); 0 for ordinary scene-referred shading.
   float display_referred;
+  // 1 for AlphaMode.mask: the coverage pre-draw already cut the surface out
+  // (MaskInfo, depth_mask.glsl), so what it kept shades at full opacity.
+  float alpha_mask;
 }
 frag_info;
 
@@ -56,6 +59,11 @@ void main() {
   vec3 decoded = display_referred ? base.rgb : SRGBToLinear(base.rgb);
   vec3 rgb = decoded * vertex_color.rgb * frag_info.color.rgb;
   float alpha = base.a * vertex_color.a * frag_info.color.a;
+  // MASK output is binary (glTF): kept fragments are fully opaque, like the
+  // lit MASK. No discard here; the coverage pre-draw cuts the surface out.
+  if (frag_info.alpha_mask > 0.5) {
+    alpha = 1.0;
+  }
   // Unlit has no environment bound, so pass the flat fog color as the sky color;
   // the sky-color mix in ApplyFog is then inert (sky-colored fog is a lit-path
   // feature).

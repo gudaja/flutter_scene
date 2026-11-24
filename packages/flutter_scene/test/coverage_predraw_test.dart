@@ -24,7 +24,15 @@ const _size = ui.Size(100, 100);
 // Draws one mesh of two overlapping quads in [alphaMode]: the far quad comes
 // first in the index order, so in the coverage color draw its fragments fail
 // the equal depth test before the near quad's fragments shade.
-Future<List<int>> _overlappingQuadsCentre(AlphaMode alphaMode) async {
+Future<List<int>> _overlappingQuadsCentre(AlphaMode alphaMode) => _quadsCentre(
+  PhysicallyBasedMaterial()
+    ..baseColorFactor = Vector4(0.1, 0.8, 0.2, 1)
+    ..alphaMode = alphaMode
+    ..doubleSided = true,
+);
+
+// [_overlappingQuadsCentre] with any [material]; the centre pixel's RGBA.
+Future<List<int>> _quadsCentre(Material material) async {
   await Scene.initializeStaticResources();
   final scene = Scene();
   final positions = <double>[
@@ -39,10 +47,7 @@ Future<List<int>> _overlappingQuadsCentre(AlphaMode alphaMode) async {
           positions: Float32List.fromList(positions),
           indices: const [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
         ),
-        PhysicallyBasedMaterial()
-          ..baseColorFactor = Vector4(0.1, 0.8, 0.2, 1)
-          ..alphaMode = alphaMode
-          ..doubleSided = true,
+        material,
       ),
     ),
   );
@@ -120,6 +125,19 @@ void main() {
     expect(material.depthAlphaMasked, isTrue);
   });
 
+  test('an alpha-masked unlit material is opaque and cuts out through its '
+      'depth mask', () {
+    final material = UnlitMaterial();
+    expect(material.depthAlphaMasked, isFalse);
+    expect(material.alphaCutoff, 0.5);
+    material.alphaMode = AlphaMode.mask;
+    expect(material.depthAlphaMasked, isTrue);
+    expect(material.isOpaque(), isTrue);
+    material.alphaMode = AlphaMode.blend;
+    expect(material.depthAlphaMasked, isFalse);
+    expect(material.isOpaque(), isFalse);
+  });
+
   test('an alpha-masked mesh whose far triangles come first in its index '
       'order draws its near triangles where they are kept, as the opaque '
       'mesh does', () async {
@@ -133,5 +151,33 @@ void main() {
         reason: 'masked $masked against opaque $opaque',
       );
     }
+  }, skip: noGpu);
+  test('an alpha-masked unlit material keeps what reaches its cutoff at full '
+      'opacity and cuts away the rest', () async {
+    UnlitMaterial unlit(AlphaMode mode, double alpha) => UnlitMaterial()
+      ..baseColorFactor = Vector4(0.1, 0.8, 0.2, alpha)
+      ..vertexColorWeight = 0
+      ..alphaMode = mode
+      ..doubleSided = true;
+    final opaque = await _quadsCentre(unlit(AlphaMode.opaque, 1));
+    final kept = await _quadsCentre(unlit(AlphaMode.mask, 0.7));
+    final cut = await _quadsCentre(unlit(AlphaMode.mask, 0.3));
+    final lowCutoff = await _quadsCentre(
+      unlit(AlphaMode.mask, 0.3)..alphaCutoff = 0.2,
+    );
+    expect(opaque[3], 255);
+    for (var channel = 0; channel < 4; channel++) {
+      expect(
+        (kept[channel] - opaque[channel]).abs(),
+        lessThanOrEqualTo(2),
+        reason: 'kept $kept against opaque $opaque',
+      );
+      expect(
+        (lowCutoff[channel] - opaque[channel]).abs(),
+        lessThanOrEqualTo(2),
+        reason: 'cutoff 0.2 $lowCutoff against opaque $opaque',
+      );
+    }
+    expect(cut[3], 0, reason: 'cut $cut');
   }, skip: noGpu);
 }

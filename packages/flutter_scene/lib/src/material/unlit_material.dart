@@ -57,14 +57,59 @@ class UnlitMaterial extends Material {
   /// How the material's alpha is interpreted. [AlphaMode.opaque] ignores
   /// alpha; [AlphaMode.blend] routes the material through the depth-sorted
   /// translucent pass with alpha blending (use for widget textures and
-  /// other surfaces with transparency).
-  // TODO(materials): support AlphaMode.mask for unlit (needs a cutoff
-  // uniform and a discard in the unlit fragment shader); it currently
-  // behaves like blend.
+  /// other surfaces with transparency); [AlphaMode.mask] draws in the opaque
+  /// pass and keeps only the fragments whose alpha reaches [alphaCutoff]
+  /// (cutout foliage, fences), shaded at full opacity like the lit MASK.
+  ///
+  /// The cutout goes through the opaque pass's coverage pre-draw (the same
+  /// depth mask the lit material uses), so the unlit shader never discards.
   AlphaMode alphaMode = AlphaMode.opaque;
 
+  /// Alpha threshold for [AlphaMode.mask]: fragments whose
+  /// `texture.a * weighted vertex-color alpha * baseColorFactor.a` falls
+  /// below it are cut away. Ignored by the other alpha modes.
+  double alphaCutoff = 0.5;
+
   @override
-  bool isOpaque() => alphaMode == AlphaMode.opaque;
+  bool isOpaque() => alphaMode != AlphaMode.blend;
+
+  @override
+  bool get depthAlphaMasked => alphaMode == AlphaMode.mask;
+
+  static final gpu.SamplerOptions _repeatSampler = gpu.SamplerOptions(
+    widthAddressMode: gpu.SamplerAddressMode.repeat,
+    heightAddressMode: gpu.SamplerAddressMode.repeat,
+  );
+
+  @override
+  void bindDepthAlphaMask(
+    gpu.RenderPass pass,
+    gpu.Shader shader,
+    TransientWriter transientsBuffer,
+  ) {
+    // Mirrors the alpha the unlit shader computes: texture.a * weighted
+    // vertex-color alpha * baseColorFactor alpha (see depth_mask.glsl).
+    final params = Float32List(12)
+      ..[0] = alphaCutoff
+      ..[1] = baseColorFactor.a
+      ..[2] = vertexColorWeight
+      ..[4] = baseColorTextureTransform.offset.x
+      ..[5] = baseColorTextureTransform.offset.y
+      ..[6] = baseColorTextureTransform.scale.x
+      ..[7] = baseColorTextureTransform.scale.y
+      ..[8] = math.cos(baseColorTextureTransform.rotation)
+      ..[9] = math.sin(baseColorTextureTransform.rotation)
+      ..[10] = baseColorTextureTexCoord.clamp(0, 1).toDouble();
+    pass.bindUniform(
+      shader.cachedUniformSlot('MaskInfo'),
+      transientsBuffer.emplace(ByteData.sublistView(params)),
+    );
+    pass.bindTexture(
+      shader.cachedUniformSlot('mask_texture'),
+      Material.whitePlaceholder(resolveTextureSource(baseColorTexture)),
+      sampler: textureSourceSampler(baseColorTexture) ?? _repeatSampler,
+    );
+  }
 
   @override
   bool get lodCrossFades => true;
@@ -106,6 +151,7 @@ class UnlitMaterial extends Material {
       vertexColorWeight, // vertex_color_weight
       lodFade, // fade
       displayReferred ? 1.0 : 0.0, // display_referred
+      alphaMode == AlphaMode.mask ? 1.0 : 0.0, // alpha_mask
     ]);
     pass.bindUniform(
       fragmentShader.cachedUniformSlot("FragInfo"),
